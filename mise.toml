@@ -1,0 +1,73 @@
+[tools]
+zig = "0.17.0"
+hk = "2.8.1"
+
+[tasks.fmt]
+description = "Format Zig sources"
+alias = "f"
+run = "zig fmt build.zig build.zig.zon src tests"
+
+[tasks.fmt-check]
+description = "Check Zig formatting"
+run = "zig fmt --check build.zig build.zig.zon src tests"
+
+[tasks.build]
+description = "Build the jsz CLI"
+alias = "b"
+run = "zig build"
+
+[tasks.build-release]
+description = "Build in ReleaseSafe"
+run = "zig build -Doptimize=ReleaseSafe"
+
+[tasks.test]
+description = "Run all tests"
+alias = "t"
+run = "zig build test"
+
+[tasks.run]
+description = "Run a script; pass arguments after the task name"
+alias = "r"
+raw_args = true
+run = "zig build run --"
+sources = ["build.zig", "build.zig.zon", "src/**/*.zig"]
+outputs = []
+
+[tasks.repl]
+description = "Start the REPL"
+run = "zig build run"
+
+[tasks.test-watch]
+description = "Re-run tests on change (native Zig watch)"
+alias = "tw"
+run = "zig build test --watch"
+
+[tasks.run-watch]
+description = "Restart the CLI on change (mise watch + watchexec)"
+alias = "rw"
+tools.watchexec = "2.8.0"
+run = "mise watch --restart run"
+
+[tasks.check]
+description = "Format check, build, and test"
+run = [
+  "zig fmt --check build.zig build.zig.zon src tests",
+  "zig build",
+  "zig build test",
+]
+
+[tasks.ci]
+description = "Format check, ReleaseSafe build, and tests"
+run = [
+  "zig fmt --check build.zig build.zig.zon src tests",
+  "zig build -Doptimize=ReleaseSafe",
+  "zig build test",
+]
+
+[tasks.doc]
+description = "List documentation entry points"
+run = "printf 'README.md\\ndocs/architecture.md\\ndocs/cli.md\\ndocs/testing.md\\ndocs/roadmap.md\\n'"
+
+[tasks.install-hooks]
+description = "Install hk git hooks"
+run = "hk install --mise"

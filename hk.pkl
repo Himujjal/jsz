@@ -1,0 +1,17 @@
+amends "package://github.com/jdx/hk/releases/download/v2.8.1/hk@2.8.1#/Config.pkl"
+
+steps {
+  ["zig-fmt"] {
+    glob = "**/*.zig"
+    exclude = List(".zig-cache/**", "zig-out/**")
+    fix = "zig fmt {{files}}"
+    check = "zig fmt --check {{files}}"
+  }
+  ["zig-build"] {
+    check = "zig build"
+  }
+  ["zig-test"] {
+    depends = "zig-build"
+    check = "zig build test"
+  }
+}

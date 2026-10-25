@@ -1,0 +1,17 @@
+.{
+    .name = .jsz,
+    .version = "0.0.1",
+    .dependencies = .{
+        .quickjs = .{
+            .url = "git+https://github.com/Inqnuam/zig-quickjs-ng#6e8f3e05cd04b5a27c20012c11fb3c674c09731d",
+            .hash = "quickjs_ng-0.0.0-0cZnA5HJAwDzPScSVrzK5cwiphOAXt89TH5T9ljJY8xl",
+        },
+        .zio = .{
+            .url = "git+https://github.com/lalinsky/zio#9b49086c72edbfbcef00acb557d6177bcaee1cb5",
+            .hash = "zio-0.19.0-xHbVVHNqLQCbtzv2oAZp_8CRYKcc76Om5t697j-vFskK",
+        },
+    },
+    .minimum_zig_version = "0.17.0",
+    .paths = .{""},
+    .fingerprint = 0xec325f3becd6a40,
+}

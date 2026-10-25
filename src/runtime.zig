@@ -1,0 +1,162 @@
+const std = @import("std");
+const quickjs = @import("quickjs");
+const zio = @import("zio");
+const EventLoop = @import("event_loop.zig").EventLoop;
+const Host = @import("js/host.zig").Host;
+const builtins = @import("js/builtins.zig");
+
+pub const Options = struct {
+    max_runtime_ms: ?u64 = null,
+    max_iterations: ?usize = null,
+    writer: ?*std.Io.Writer = null,
+};
+
+pub const Runtime = struct {
+    allocator: std.mem.Allocator,
+    zio_rt: *zio.Runtime,
+    js_rt: *quickjs.Runtime,
+    ctx: *quickjs.Context,
+    loop: EventLoop,
+    host: Host = undefined,
+    out: std.ArrayList(u8) = .empty,
+    writer: ?*std.Io.Writer = null,
+
+    pub fn init(allocator: std.mem.Allocator, options: Options) !*Runtime {
+        const self = try allocator.create(Runtime);
+        errdefer allocator.destroy(self);
+
+        const zio_rt = try zio.Runtime.init(allocator, .{});
+        errdefer zio_rt.deinit();
+
+        const js_rt = try quickjs.Runtime.init();
+        errdefer js_rt.deinit();
+
+        const ctx = try quickjs.Context.init(js_rt);
+        errdefer ctx.deinit();
+
+        self.* = .{
+            .allocator = allocator,
+            .zio_rt = zio_rt,
+            .js_rt = js_rt,
+            .ctx = ctx,
+            .loop = undefined,
+            .writer = options.writer,
+        };
+        errdefer self.out.deinit(allocator);
+
+        self.loop = try EventLoop.init(allocator, ctx, js_rt);
+        errdefer self.loop.deinit();
+        self.loop.sink = &self.out;
+        self.loop.max_iterations = options.max_iterations;
+        self.loop.max_runtime_ns = if (options.max_runtime_ms) |ms| ms *| std.time.ns_per_ms else null;
+
+        self.host = .{
+            .allocator = allocator,
+            .ctx = ctx,
+            .loop = &self.loop,
+            .out = &self.out,
+        };
+        ctx.setOpaque(Host, &self.host);
+        try builtins.register(&self.host);
+
+        return self;
+    }
+
+    pub fn deinit(self: *Runtime) void {
+        self.flush() catch {};
+        self.loop.deinit();
+        self.ctx.deinit();
+        self.js_rt.deinit();
+        self.zio_rt.deinit();
+        self.out.deinit(self.allocator);
+        const allocator = self.allocator;
+        allocator.destroy(self);
+    }
+
+    pub fn context(self: *Runtime) *quickjs.Context {
+        return self.ctx;
+    }
+
+    pub fn eval(
+        self: *Runtime,
+        source: []const u8,
+        filename: [:0]const u8,
+    ) !quickjs.Value {
+        // QuickJS requires input[input_len] to be a NUL byte.
+        const terminated = try self.allocator.dupeSentinel(u8, source, 0);
+        defer self.allocator.free(terminated);
+        return self.evalTerminated(terminated, filename);
+    }
+
+    pub fn evalFile(self: *Runtime, path: []const u8) !quickjs.Value {
+        const source = try std.Io.Dir.cwd().readFileAllocOptions(
+            self.zio_rt.io(),
+            path,
+            self.allocator,
+            .limited(16 * 1024 * 1024),
+            .of(u8),
+            0,
+        );
+        defer self.allocator.free(source);
+
+        const filename = try self.allocator.dupeSentinel(u8, path, 0);
+        defer self.allocator.free(filename);
+
+        return self.evalTerminated(source, filename);
+    }
+
+    fn evalTerminated(
+        self: *Runtime,
+        source: [:0]const u8,
+        filename: [:0]const u8,
+    ) !quickjs.Value {
+        const value = self.ctx.eval(source, filename, .{});
+        if (value.isException()) {
+            self.reportException();
+            value.deinit(self.ctx);
+            return error.JavaScriptError;
+        }
+        return value;
+    }
+
+    pub fn run(self: *Runtime) !void {
+        try self.loop.run();
+        try self.flush();
+    }
+
+    pub fn tick(self: *Runtime) !void {
+        try self.loop.tick();
+        try self.flush();
+    }
+
+    pub fn appendValue(self: *Runtime, value: quickjs.Value) void {
+        const text = value.toStringValue(self.ctx);
+        defer text.deinit(self.ctx);
+
+        if (text.toCString(self.ctx)) |cstr| {
+            defer self.ctx.freeCString(cstr);
+            self.out.appendSlice(self.allocator, std.mem.span(cstr)) catch {};
+        }
+        self.out.append(self.allocator, '\n') catch {};
+    }
+
+    pub fn flush(self: *Runtime) !void {
+        if (self.out.items.len == 0) return;
+
+        if (self.writer) |writer| {
+            try writer.writeAll(self.out.items);
+            try writer.flush();
+        } else {
+            var buffer: [4096]u8 = undefined;
+            var writer = std.Io.File.stdout().writer(self.zio_rt.io(), &buffer);
+            try writer.interface.writeAll(self.out.items);
+            try writer.interface.flush();
+        }
+
+        self.out.clearRetainingCapacity();
+    }
+
+    fn reportException(self: *Runtime) void {
+        self.loop.reportException();
+    }
+};
