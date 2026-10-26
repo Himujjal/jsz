@@ -1,6 +1,7 @@
 const std = @import("std");
 const quickjs = @import("quickjs");
 const zio = @import("zio");
+const Fs = @import("fs.zig").Fs;
 
 pub const Timer = struct {
     id: u64,
@@ -27,6 +28,7 @@ pub const EventLoop = struct {
     started_ns: u64,
     iterations: usize = 0,
     sink: ?*std.ArrayList(u8) = null,
+    fs: ?*Fs = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -123,34 +125,61 @@ pub const EventLoop = struct {
                 self.failed = true;
                 return err;
             };
+            self.dispatchFs();
+
+            const deadline = self.nextDeadline();
+            const fs_pending = if (self.fs) |fs| fs.hasWork() else false;
+            if (deadline == null and !fs_pending) break;
 
             const current = now();
-            const next = self.nextDeadline() orelse break;
-
-            if (next > current) {
-                zio.sleep(.fromNanoseconds(next - current)) catch |err| {
-                    self.failed = true;
-                    return err;
-                };
+            if (deadline) |next| {
+                if (next > current) {
+                    if (fs_pending) {
+                        self.fs.?.wait(next - current);
+                    } else {
+                        zio.sleep(.fromNanoseconds(next - current)) catch |err| {
+                            self.failed = true;
+                            return err;
+                        };
+                    }
+                }
+            } else {
+                self.fs.?.wait(null);
             }
 
-            self.fireDue(now()) catch |err| {
+            self.dispatchFs();
+            self.drainJobs() catch |err| {
                 self.failed = true;
                 return err;
             };
+
+            if (self.nextDeadline()) |next| {
+                if (next <= now()) {
+                    self.fireDue(now()) catch |err| {
+                        self.failed = true;
+                        return err;
+                    };
+                }
+            }
             self.iterations += 1;
         }
 
+        self.dispatchFs();
         if (self.failed) return error.JavaScriptError;
     }
 
     pub fn tick(self: *EventLoop) !void {
         try self.drainJobs();
+        self.dispatchFs();
         self.fireDue(now()) catch |err| {
             self.failed = true;
             return err;
         };
         try self.drainJobs();
+    }
+
+    fn dispatchFs(self: *EventLoop) void {
+        if (self.fs) |fs| fs.dispatch(self.ctx);
     }
 
     pub fn drainJobs(self: *EventLoop) !void {

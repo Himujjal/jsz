@@ -36,3 +36,22 @@ pub fn runFixture(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
 
     return readResult(allocator, runtime);
 }
+
+/// Runs a fixture and returns everything it wrote through `console.log`.
+pub fn runFixtureStdout(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    var writer: std.Io.Writer.Allocating = .init(allocator);
+    defer writer.deinit();
+
+    const runtime = try initRuntime(&writer.writer);
+    defer runtime.deinit();
+
+    const path = try std.fs.path.join(allocator, &.{ fixture_dir, name });
+    defer allocator.free(path);
+
+    const value = try runtime.evalFile(path);
+    value.deinit(runtime.context());
+    try runtime.run();
+    try runtime.flush();
+
+    return allocator.dupe(u8, writer.written());
+}

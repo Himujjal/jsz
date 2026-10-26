@@ -40,6 +40,7 @@ pub fn build(b: *std.Build) !void {
 
     const test_options = b.addOptions();
     test_options.addOption([]const u8, "fixtures_dir", "tests/fixtures");
+    test_options.addOption([]const u8, "path_expected", @embedFile("tests/fixtures/path.expected"));
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path("tests/zig/main.zig"),

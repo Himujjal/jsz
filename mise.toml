@@ -16,9 +16,10 @@ description = "Build the jsz CLI"
 alias = "b"
 run = "zig build"
 
+# prefer small because the runtime is supposed to be small rather than fast
 [tasks.build-release]
-description = "Build in ReleaseSafe"
-run = "zig build -Doptimize=ReleaseSafe"
+description = "Build in ReleaseSmall"
+run = "zig build -Doptimize=ReleaseSmall"
 
 [tasks.test]
 description = "Run all tests"

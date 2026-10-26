@@ -2,8 +2,10 @@ const std = @import("std");
 const quickjs = @import("quickjs");
 const zio = @import("zio");
 const EventLoop = @import("event_loop.zig").EventLoop;
+const Fs = @import("fs.zig").Fs;
 const Host = @import("js/host.zig").Host;
 const builtins = @import("js/builtins.zig");
+const module = @import("module.zig");
 
 pub const Options = struct {
     max_runtime_ms: ?u64 = null,
@@ -17,6 +19,7 @@ pub const Runtime = struct {
     js_rt: *quickjs.Runtime,
     ctx: *quickjs.Context,
     loop: EventLoop,
+    fs: Fs = undefined,
     host: Host = undefined,
     out: std.ArrayList(u8) = .empty,
     writer: ?*std.Io.Writer = null,
@@ -25,7 +28,10 @@ pub const Runtime = struct {
         const self = try allocator.create(Runtime);
         errdefer allocator.destroy(self);
 
-        const zio_rt = try zio.Runtime.init(allocator, .{});
+        const zio_rt = try zio.Runtime.init(allocator, .{
+            .executors = .exact(1),
+            .enable_main_executor = false,
+        });
         errdefer zio_rt.deinit();
 
         const js_rt = try quickjs.Runtime.init();
@@ -50,20 +56,27 @@ pub const Runtime = struct {
         self.loop.max_iterations = options.max_iterations;
         self.loop.max_runtime_ns = if (options.max_runtime_ms) |ms| ms *| std.time.ns_per_ms else null;
 
+        self.fs = Fs.init(allocator, zio_rt);
+        self.loop.fs = &self.fs;
+
         self.host = .{
             .allocator = allocator,
+            .io = zio_rt.io(),
             .ctx = ctx,
             .loop = &self.loop,
             .out = &self.out,
+            .fs = &self.fs,
         };
         ctx.setOpaque(Host, &self.host);
         try builtins.register(&self.host);
+        js_rt.setModuleLoaderFunc(Host, &self.host, module.normalize, module.load);
 
         return self;
     }
 
     pub fn deinit(self: *Runtime) void {
         self.flush() catch {};
+        self.fs.deinit(self.ctx);
         self.loop.deinit();
         self.ctx.deinit();
         self.js_rt.deinit();
@@ -85,7 +98,7 @@ pub const Runtime = struct {
         // QuickJS requires input[input_len] to be a NUL byte.
         const terminated = try self.allocator.dupeSentinel(u8, source, 0);
         defer self.allocator.free(terminated);
-        return self.evalTerminated(terminated, filename);
+        return self.evalTerminated(terminated, filename, false);
     }
 
     pub fn evalFile(self: *Runtime, path: []const u8) !quickjs.Value {
@@ -102,15 +115,26 @@ pub const Runtime = struct {
         const filename = try self.allocator.dupeSentinel(u8, path, 0);
         defer self.allocator.free(filename);
 
-        return self.evalTerminated(source, filename);
+        return self.evalTerminated(source, filename, isModulePath(path, source));
+    }
+
+    /// `.mjs` is always a module, `.cjs` is always a script, and `.js` is
+    /// detected from its top-level syntax (Node does the same for
+    /// ambiguous input).
+    fn isModulePath(path: []const u8, source: []const u8) bool {
+        if (std.mem.endsWith(u8, path, ".mjs")) return true;
+        if (std.mem.endsWith(u8, path, ".cjs")) return false;
+        return quickjs.detectModule(source);
     }
 
     fn evalTerminated(
         self: *Runtime,
         source: [:0]const u8,
         filename: [:0]const u8,
+        is_module: bool,
     ) !quickjs.Value {
-        const value = self.ctx.eval(source, filename, .{});
+        const flags: quickjs.EvalFlags = if (is_module) .{ .type = .module } else .{};
+        const value = self.ctx.eval(source, filename, flags);
         if (value.isException()) {
             self.reportException();
             value.deinit(self.ctx);
