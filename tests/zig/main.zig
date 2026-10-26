@@ -9,4 +9,6 @@ test {
     _ = @import("fixtures_test.zig");
     _ = @import("path_test.zig");
     _ = @import("fs_test.zig");
+    _ = @import("process_test.zig");
+    _ = @import("cli_test.zig");
 }

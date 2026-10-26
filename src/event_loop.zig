@@ -29,6 +29,7 @@ pub const EventLoop = struct {
     iterations: usize = 0,
     sink: ?*std.ArrayList(u8) = null,
     fs: ?*Fs = null,
+    exit_code: u8 = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,

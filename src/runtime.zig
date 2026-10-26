@@ -11,6 +11,9 @@ pub const Options = struct {
     max_runtime_ms: ?u64 = null,
     max_iterations: ?usize = null,
     writer: ?*std.Io.Writer = null,
+    /// Borrowed process arguments; the caller must outlive the runtime.
+    argv: ?[]const []const u8 = null,
+    environ_map: ?*std.process.Environ.Map = null,
 };
 
 pub const Runtime = struct {
@@ -23,6 +26,7 @@ pub const Runtime = struct {
     host: Host = undefined,
     out: std.ArrayList(u8) = .empty,
     writer: ?*std.Io.Writer = null,
+    env_owned: ?std.process.Environ.Map = null,
 
     pub fn init(allocator: std.mem.Allocator, options: Options) !*Runtime {
         const self = try allocator.create(Runtime);
@@ -59,6 +63,9 @@ pub const Runtime = struct {
         self.fs = Fs.init(allocator, zio_rt);
         self.loop.fs = &self.fs;
 
+        self.env_owned = if (options.environ_map == null) std.process.Environ.Map.init(allocator) else null;
+        errdefer if (self.env_owned) |*map| map.deinit();
+
         self.host = .{
             .allocator = allocator,
             .io = zio_rt.io(),
@@ -66,10 +73,21 @@ pub const Runtime = struct {
             .loop = &self.loop,
             .out = &self.out,
             .fs = &self.fs,
+            .argv = options.argv orelse &.{},
+            .environ = options.environ_map orelse &self.env_owned.?,
         };
         ctx.setOpaque(Host, &self.host);
         try builtins.register(&self.host);
         js_rt.setModuleLoaderFunc(Host, &self.host, module.normalize, module.load);
+
+        // Bootstrap last: it imports the modules that need the host opaque set.
+        const bootstrap = @embedFile("builtins/bootstrap.js");
+        const value = ctx.eval(bootstrap, "jsz:bootstrap", .{ .type = .module });
+        if (value.isException()) {
+            value.deinit(ctx);
+            return error.ModuleInitFailed;
+        }
+        value.deinit(ctx);
 
         return self;
     }
@@ -81,9 +99,14 @@ pub const Runtime = struct {
         self.ctx.deinit();
         self.js_rt.deinit();
         self.zio_rt.deinit();
+        if (self.env_owned) |*map| map.deinit();
         self.out.deinit(self.allocator);
         const allocator = self.allocator;
         allocator.destroy(self);
+    }
+
+    pub fn exitCode(self: *Runtime) u8 {
+        return self.loop.exit_code;
     }
 
     pub fn context(self: *Runtime) *quickjs.Context {

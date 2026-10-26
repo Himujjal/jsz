@@ -10,4 +10,7 @@ pub const Host = struct {
     loop: *EventLoop,
     out: *std.ArrayList(u8),
     fs: *Fs,
+    /// Borrowed process arguments; owned by the caller that outlives the runtime.
+    argv: []const []const u8,
+    environ: *std.process.Environ.Map,
 };

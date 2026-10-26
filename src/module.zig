@@ -2,6 +2,7 @@ const std = @import("std");
 const quickjs = @import("quickjs");
 const Host = @import("js/host.zig").Host;
 const fs_native = @import("js/fs.zig");
+const process_native = @import("js/process.zig");
 
 pub const max_module_bytes = 16 * 1024 * 1024;
 
@@ -16,6 +17,8 @@ pub const builtin_list = [_]Builtin{
     .{ .name = "node:fs", .source = @embedFile("builtins/fs.js") },
     .{ .name = "node:fs/promises", .source = @embedFile("builtins/fs_promises.js") },
     .{ .name = "node:path", .source = @embedFile("builtins/path.js") },
+    .{ .name = "node:_process", .source = "", .native = true },
+    .{ .name = "node:process", .source = @embedFile("builtins/process.js") },
 };
 
 const probing_suffixes = [_][]const u8{ "", ".js", ".mjs", "/index.js", "/index.mjs" };
@@ -163,12 +166,7 @@ pub fn load(host_opt: ?*Host, ctx: *quickjs.Context, name: [:0]const u8) ?*quick
     };
 
     if (findBuiltin(name)) |builtin| {
-        if (builtin.native) {
-            return fs_native.initModule(ctx) orelse {
-                _ = ctx.throwOutOfMemory();
-                return null;
-            };
-        }
+        if (builtin.native) return loadNative(ctx, builtin.name);
         return compile(host, ctx, builtin.source, builtin.name);
     }
     if (std.mem.startsWith(u8, name, "node:")) {
@@ -176,6 +174,21 @@ pub fn load(host_opt: ?*Host, ctx: *quickjs.Context, name: [:0]const u8) ?*quick
         return null;
     }
     return loadFile(host, ctx, name);
+}
+
+fn loadNative(ctx: *quickjs.Context, name: []const u8) ?*quickjs.ModuleDef {
+    const def = if (std.mem.eql(u8, name, "node:_fs"))
+        fs_native.initModule(ctx)
+    else if (std.mem.eql(u8, name, "node:_process"))
+        process_native.initModule(ctx)
+    else
+        null;
+
+    if (def == null) {
+        _ = ctx.throwOutOfMemory();
+        return null;
+    }
+    return def;
 }
 
 fn loadFile(host: *Host, ctx: *quickjs.Context, name: []const u8) ?*quickjs.ModuleDef {

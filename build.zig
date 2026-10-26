@@ -41,6 +41,10 @@ pub fn build(b: *std.Build) !void {
     const test_options = b.addOptions();
     test_options.addOption([]const u8, "fixtures_dir", "tests/fixtures");
     test_options.addOption([]const u8, "path_expected", @embedFile("tests/fixtures/path.expected"));
+    // `zig build` installs to zig-out by default; run steps execute with the
+    // build root as cwd, so a relative path is stable. A custom --prefix is not
+    // carried over (Build has no configure-time install-path accessor in 0.17).
+    test_options.addOption([]const u8, "jsz_exe", "zig-out/bin/jsz");
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path("tests/zig/main.zig"),
@@ -60,6 +64,8 @@ pub fn build(b: *std.Build) !void {
     });
     const run_tests = b.addRunArtifact(tests);
     run_tests.addPassthruArgs();
+    // cli_test spawns the installed binary.
+    run_tests.step.dependOn(b.getInstallStep());
     const test_step = b.step("test", "Run unit and fixture tests");
     test_step.dependOn(&run_tests.step);
 }
