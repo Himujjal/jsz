@@ -1,6 +1,7 @@
 const std = @import("std");
 const quickjs = @import("quickjs");
 const Host = @import("js/host.zig").Host;
+const encoding_native = @import("js/encoding.zig");
 const fs_native = @import("js/fs.zig");
 const process_native = @import("js/process.zig");
 
@@ -13,6 +14,9 @@ pub const Builtin = struct {
 };
 
 pub const builtin_list = [_]Builtin{
+    .{ .name = "node:_encoding", .source = "", .native = true },
+    .{ .name = "node:buffer", .source = @embedFile("builtins/buffer.js") },
+    .{ .name = "node:util", .source = @embedFile("builtins/util.js") },
     .{ .name = "node:_fs", .source = "", .native = true },
     .{ .name = "node:fs", .source = @embedFile("builtins/fs.js") },
     .{ .name = "node:fs/promises", .source = @embedFile("builtins/fs_promises.js") },
@@ -187,6 +191,8 @@ fn loadNative(ctx: *quickjs.Context, name: []const u8) ?*quickjs.ModuleDef {
         fs_native.initModule(ctx)
     else if (std.mem.eql(u8, name, "node:_process"))
         process_native.initModule(ctx)
+    else if (std.mem.eql(u8, name, "node:_encoding"))
+        encoding_native.initModule(ctx)
     else
         null;
 

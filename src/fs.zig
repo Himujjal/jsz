@@ -1,6 +1,7 @@
 const std = @import("std");
 const quickjs = @import("quickjs");
 const zio = @import("zio");
+const jobs = @import("jobs.zig");
 
 pub const max_read_bytes = 64 * 1024 * 1024;
 
@@ -131,6 +132,7 @@ pub const Outcome = union(enum) {
 
 pub const Job = struct {
     op: Op,
+    allocator: std.mem.Allocator = undefined,
     path: []u8 = &.{},
     path2: []u8 = &.{},
     data: []u8 = &.{},
@@ -153,7 +155,8 @@ pub const Job = struct {
     reject: quickjs.Value = .undefined,
     outcome: Outcome = .none,
     err: ?ErrorCode = null,
-    next: ?*Job = null,
+    /// Completion-queue node; `context` points back at this job.
+    link: jobs.Job = undefined,
 
     /// Frees Zig memory only. QuickJS values are released by the caller with a
     /// context, either after settling or while aborting.
@@ -185,34 +188,30 @@ pub const Fs = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     rt: *zio.Runtime,
-    mutex: zio.os.Mutex = .init(),
-    cond: zio.os.Condition = .init(),
-    completed_head: ?*Job = null,
-    completed_tail: ?*Job = null,
-    pending: usize = 0,
-    closed: bool = false,
+    queue: jobs.Queue,
 
     pub fn init(allocator: std.mem.Allocator, rt: *zio.Runtime) Fs {
         return .{
             .allocator = allocator,
             .io = rt.io(),
             .rt = rt,
+            .queue = jobs.Queue.init(allocator),
         };
     }
 
     pub fn submit(self: *Fs, job: *Job) !void {
-        self.mutex.lock();
-        if (self.closed) {
-            self.mutex.unlock();
-            return error.Closed;
-        }
-        self.pending += 1;
-        self.mutex.unlock();
+        job.allocator = self.allocator;
+        job.link = .{
+            .context = job,
+            .settle = settleJob,
+            .abort = abortJob,
+        };
+
+        try self.queue.submit(&job.link);
 
         _ = self.rt.spawn(runJob, .{ self, job }) catch |err| {
-            self.mutex.lock();
-            self.pending -= 1;
-            self.mutex.unlock();
+            // The task never started, so the job must not stay pending.
+            self.queue.cancel();
             return err;
         };
     }
@@ -220,115 +219,30 @@ pub const Fs = struct {
     fn runJob(self: *Fs, job: *Job) void {
         job.outcome = self.execute(job) catch |err| {
             job.err = mapError(err);
-            self.complete(job);
+            self.queue.complete(&job.link);
             return;
         };
-        self.complete(job);
-    }
-
-    fn complete(self: *Fs, job: *Job) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        job.next = null;
-        if (self.completed_tail) |tail| {
-            tail.next = job;
-        } else {
-            self.completed_head = job;
-        }
-        self.completed_tail = job;
-        self.pending -= 1;
-        self.cond.signal();
+        self.queue.complete(&job.link);
     }
 
     pub fn hasWork(self: *Fs) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        return self.pending > 0 or self.completed_head != null;
-    }
-
-    pub fn take(self: *Fs) ?*Job {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        const job = self.completed_head orelse return null;
-        self.completed_head = job.next;
-        if (self.completed_head == null) self.completed_tail = null;
-        job.next = null;
-        return job;
+        return self.queue.hasWork();
     }
 
     /// Waits for a completion. A null timeout blocks until one arrives.
     pub fn wait(self: *Fs, timeout_ns: ?u64) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-
-        if (self.completed_head != null) return;
-
-        if (timeout_ns) |ns| {
-            if (ns == 0) return;
-            self.cond.timedWait(&self.mutex, .fromNanoseconds(ns)) catch {};
-        } else {
-            while (self.completed_head == null) {
-                self.cond.wait(&self.mutex);
-            }
-        }
+        self.queue.wait(timeout_ns);
     }
 
     /// Settles every completed job on the JS thread, then frees it.
     pub fn dispatch(self: *Fs, ctx: *quickjs.Context) void {
-        while (self.take()) |job| {
-            self.settle(ctx, job);
-        }
-    }
-
-    fn settle(self: *Fs, ctx: *quickjs.Context, job: *Job) void {
-        defer {
-            job.resolve.deinit(ctx);
-            job.reject.deinit(ctx);
-            job.free(self.allocator);
-        }
-
-        if (job.err) |code| {
-            const error_value = makeError(ctx, code, job);
-            defer error_value.deinit(ctx);
-            const ignored = job.reject.call(ctx, .undefined, &.{error_value});
-            ignored.deinit(ctx);
-            return;
-        }
-
-        const value = toValue(ctx, job) catch {
-            const error_value = makeError(ctx, .eio, job);
-            defer error_value.deinit(ctx);
-            const ignored = job.reject.call(ctx, .undefined, &.{error_value});
-            ignored.deinit(ctx);
-            return;
-        };
-        defer value.deinit(ctx);
-
-        const ignored = job.resolve.call(ctx, .undefined, &.{value});
-        ignored.deinit(ctx);
+        self.queue.dispatch(ctx);
     }
 
     /// Stops accepting jobs, waits for in-flight work, and frees leftovers.
     pub fn deinit(self: *Fs, ctx: *quickjs.Context) void {
-        self.mutex.lock();
-        self.closed = true;
-        while (self.pending > 0) {
-            self.cond.timedWait(&self.mutex, .fromMilliseconds(5)) catch {};
-        }
-        var node = self.completed_head;
-        self.completed_head = null;
-        self.completed_tail = null;
-        self.mutex.unlock();
-
-        while (node) |job| {
-            const next = job.next;
-            job.resolve.deinit(ctx);
-            job.reject.deinit(ctx);
-            job.free(self.allocator);
-            node = next;
-        }
+        self.queue.shutdown(ctx);
+        self.queue.deinit();
     }
 
     fn execute(self: *Fs, job: *Job) !Outcome {
@@ -505,6 +419,44 @@ pub const Fs = struct {
 
 fn lessThanEntry(_: void, a: EntryData, b: EntryData) bool {
     return std.mem.lessThan(u8, a.name, b.name);
+}
+
+/// Rejects the job's promise with the failure or settles it with the outcome.
+fn settleJob(ctx: *quickjs.Context, link: *jobs.Job) void {
+    const job: *Job = @ptrCast(@alignCast(link.context));
+    defer {
+        job.resolve.deinit(ctx);
+        job.reject.deinit(ctx);
+        job.free(job.allocator);
+    }
+
+    if (job.err) |code| {
+        const error_value = makeError(ctx, code, job);
+        defer error_value.deinit(ctx);
+        const ignored = job.reject.call(ctx, .undefined, &.{error_value});
+        ignored.deinit(ctx);
+        return;
+    }
+
+    const value = toValue(ctx, job) catch {
+        const error_value = makeError(ctx, .eio, job);
+        defer error_value.deinit(ctx);
+        const ignored = job.reject.call(ctx, .undefined, &.{error_value});
+        ignored.deinit(ctx);
+        return;
+    };
+    defer value.deinit(ctx);
+
+    const ignored = job.resolve.call(ctx, .undefined, &.{value});
+    ignored.deinit(ctx);
+}
+
+/// Drops a job that never got to settle, releasing its QuickJS values.
+fn abortJob(ctx: *quickjs.Context, link: *jobs.Job) void {
+    const job: *Job = @ptrCast(@alignCast(link.context));
+    job.resolve.deinit(ctx);
+    job.reject.deinit(ctx);
+    job.free(job.allocator);
 }
 
 fn millisToNanos(ms: f64) i96 {

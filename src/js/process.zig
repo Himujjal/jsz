@@ -149,6 +149,7 @@ fn chdir(ctx_opt: ?*quickjs.Context, _: Value, args: []const quickjs.c.JSValue) 
     std.process.setCurrentPath(host.io, path) catch |err| {
         return Value.initStringLen(ctx, chdirCode(err));
     };
+    host.refreshCwd();
     return Value.initStringLen(ctx, "");
 }
 

@@ -3,6 +3,7 @@
 // JS task. `*Sync` names exist only to fail loudly.
 
 import * as native from 'node:_fs';
+import { Buffer } from 'node:buffer';
 import { join } from 'node:path';
 
 export const constants = {
@@ -31,22 +32,25 @@ function invalidArg(name, value, reason = 'is invalid') {
 }
 
 function invalidEncoding(encoding) {
-  return invalidArg('encoding', encoding, 'is not supported (use utf8 or buffer)');
+  return invalidArg('encoding', encoding, 'is invalid encoding');
 }
 
+/// Returns `null` for a Buffer result, `'utf8'` for the native string path, or
+/// any other supported Buffer encoding name.
 function asTextEncoding(encoding) {
   const normalized = String(encoding).toLowerCase().replace(/-/g, '');
-  if (normalized === 'utf8') return true;
-  if (normalized === 'buffer') return false;
-  throw invalidEncoding(encoding);
+  if (normalized === 'buffer') return null;
+  if (normalized === 'utf8') return 'utf8';
+  if (!Buffer.isEncoding(normalized)) throw invalidEncoding(encoding);
+  return normalized;
 }
 
 function readOptions(options) {
-  if (options == null) return false;
+  if (options == null) return null;
   if (typeof options === 'string') return asTextEncoding(options);
   if (typeof options !== 'object') throw invalidArg('options', options);
 
-  if (options.encoding == null) return false;
+  if (options.encoding == null) return null;
   return asTextEncoding(options.encoding);
 }
 
@@ -178,7 +182,13 @@ export class Dirent {
 
 export const promises = {
   async readFile(path, options) {
-    return native.readFile(path, readOptions(options));
+    const encoding = readOptions(options);
+    // `utf8` goes through the native string path; every other encoding is
+    // applied to the raw bytes so hex/base64 see the file's real contents.
+    if (encoding === 'utf8') return native.readFile(path, true);
+
+    const buffer = Buffer.from(await native.readFile(path, false));
+    return encoding === null ? buffer : buffer.toString(encoding);
   },
 
   async writeFile(path, data, options) {

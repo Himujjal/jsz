@@ -12,4 +12,7 @@ test {
     _ = @import("process_test.zig");
     _ = @import("cli_test.zig");
     _ = @import("module_test.zig");
+    _ = @import("buffer_test.zig");
+    _ = @import("jobs_test.zig");
+    _ = @import("async_test.zig");
 }

@@ -29,6 +29,8 @@ pub const EventLoop = struct {
     iterations: usize = 0,
     sink: ?*std.ArrayList(u8) = null,
     fs: ?*Fs = null,
+    /// Node-style "keeps the process alive" counter for live I/O handles.
+    ref_count: usize = 0,
     exit_code: u8 = 0,
 
     pub fn init(
@@ -119,6 +121,21 @@ pub const EventLoop = struct {
         self.stopped = true;
     }
 
+    /// Marks a live handle; the loop keeps running while any ref is held.
+    pub fn ref(self: *EventLoop) void {
+        self.ref_count += 1;
+    }
+
+    /// Releases a live handle; saturates at zero.
+    pub fn unref(self: *EventLoop) void {
+        self.ref_count -|= 1;
+    }
+
+    /// True while at least one handle keeps the loop alive.
+    pub fn hasRefs(self: *EventLoop) bool {
+        return self.ref_count > 0;
+    }
+
     pub fn run(self: *EventLoop) !void {
         while (!self.stopped) {
             try self.checkLimits();
@@ -130,7 +147,7 @@ pub const EventLoop = struct {
 
             const deadline = self.nextDeadline();
             const fs_pending = if (self.fs) |fs| fs.hasWork() else false;
-            if (deadline == null and !fs_pending) break;
+            if (deadline == null and !fs_pending and self.ref_count == 0) break;
 
             const current = now();
             if (deadline) |next| {
@@ -144,8 +161,13 @@ pub const EventLoop = struct {
                         };
                     }
                 }
-            } else {
+            } else if (fs_pending) {
                 self.fs.?.wait(null);
+            } else {
+                // No timer and no queued work, but live handles: hang on the
+                // queue instead of spinning.
+                const fs = self.fs orelse break;
+                fs.wait(null);
             }
 
             self.dispatchFs();

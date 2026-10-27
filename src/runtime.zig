@@ -78,6 +78,8 @@ pub const Runtime = struct {
             .environ = options.environ_map orelse &self.env_owned.?,
         };
         ctx.setOpaque(Host, &self.host);
+        self.host.refreshCwd();
+        errdefer self.host.deinitCwd();
         try builtins.register(&self.host);
         js_rt.setModuleLoaderFunc(Host, &self.host, module.normalize, module.load);
 
@@ -95,6 +97,7 @@ pub const Runtime = struct {
 
     pub fn deinit(self: *Runtime) void {
         self.flush() catch {};
+        self.host.deinitCwd();
         self.fs.deinit(self.ctx);
         self.loop.deinit();
         self.ctx.deinit();
@@ -113,6 +116,11 @@ pub const Runtime = struct {
 
     pub fn context(self: *Runtime) *quickjs.Context {
         return self.ctx;
+    }
+
+    /// Re-reads the process cwd into `host.cwd`; on failure it is unchanged.
+    pub fn refreshCwd(self: *Runtime) void {
+        self.host.refreshCwd();
     }
 
     pub fn eval(
