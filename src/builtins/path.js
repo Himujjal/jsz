@@ -1,6 +1,8 @@
 // Self-contained port of Node.js 22 `node:path` (POSIX and Win32).
-// No host globals, no imports: only ECMAScript builtins are used.
-// `matchesGlob` is intentionally omitted because it needs minimatch.
+// Only `process.cwd()` is read from the host; everything else is ECMAScript
+// builtins. `matchesGlob` is intentionally omitted because it needs minimatch.
+
+import process from 'node:process';
 
 export const sep = '/';
 export const delimiter = ':';
@@ -133,17 +135,23 @@ function formatPath(separator, pathObject) {
   return dir === pathObject.root ? `${dir}${base}` : `${dir}${separator}${base}`;
 }
 
-const POSIX_CWD = '/';
-// A virtual root-relative cwd: no drive is injected when a path has none.
-const WIN32_CWD = '\\';
+// The working directory is read on every call so `process.chdir` is reflected;
+// Node does the same in `path.resolve`.
+function currentCwd() {
+  try {
+    return process.cwd();
+  } catch {
+    return '/';
+  }
+}
 
 // POSIX implementation.
 
 export function resolve(...paths) {
-  // No filesystem access: the current working directory is assumed to be '/'.
+  const cwd = currentCwd();
   if (paths.length === 0 ||
       (paths.length === 1 && (paths[0] === '' || paths[0] === '.'))) {
-    return POSIX_CWD;
+    return cwd;
   }
   let resolvedPath = '';
   let resolvedAbsolute = false;
@@ -162,8 +170,8 @@ export function resolve(...paths) {
   }
 
   if (!resolvedAbsolute) {
-    resolvedPath = `${POSIX_CWD}/${resolvedPath}`;
-    resolvedAbsolute = POSIX_CWD.charCodeAt(0) === CHAR_FORWARD_SLASH;
+    resolvedPath = `${cwd}/${resolvedPath}`;
+    resolvedAbsolute = cwd.charCodeAt(0) === CHAR_FORWARD_SLASH;
   }
 
   // Normalize the path
@@ -547,8 +555,9 @@ function resolveWin32(...args) {
         continue;
       }
     } else if (resolvedDevice.length === 0) {
-      // No process access: assume a root-relative working directory.
-      path = WIN32_CWD;
+      // Resolve against the host cwd, converted by normalization (Node does
+      // the same on POSIX, which is why `win32.resolve('a')` starts with `\`).
+      path = currentCwd();
     } else {
       // Drive-specific working directories are unavailable; use the root.
       path = `${resolvedDevice}\\`;

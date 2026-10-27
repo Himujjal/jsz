@@ -107,6 +107,13 @@ out('posix-resolve-root', posix.resolve('/'));
 // POSIX: toNamespacedPath
 out('posix-namespaced', posix.toNamespacedPath('/a/b'));
 
+// POSIX: resolve reads the live cwd (booleans keep output cwd-independent).
+out('posix-resolve-cwd-joined', posix.resolve('x') === posix.join(process.cwd(), 'x'));
+out('posix-resolve-cwd-dot', posix.resolve('.') === process.cwd());
+out('posix-relative-cwd', posix.relative('a', 'b') === '../b');
+out('win32-resolve-cwd-tail', win32.resolve('x').endsWith('\\x') && win32.resolve('x').startsWith('\\'));
+out('win32-relative-cwd', win32.relative('a', 'b') === '..\\b');
+
 // Win32: normalize
 out('win32-normalize-empty', win32.normalize(''));
 out('win32-normalize-drive-root', win32.normalize('C:\\'));

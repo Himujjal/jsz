@@ -4,6 +4,8 @@ const Host = @import("js/host.zig").Host;
 const encoding_native = @import("js/encoding.zig");
 const fs_native = @import("js/fs.zig");
 const process_native = @import("js/process.zig");
+const crypto_native = @import("js/crypto.zig");
+const url_native = @import("js/url.zig");
 
 pub const max_module_bytes = 16 * 1024 * 1024;
 
@@ -23,6 +25,12 @@ pub const builtin_list = [_]Builtin{
     .{ .name = "node:path", .source = @embedFile("builtins/path.js") },
     .{ .name = "node:_process", .source = "", .native = true },
     .{ .name = "node:process", .source = @embedFile("builtins/process.js") },
+    .{ .name = "node:os", .source = @embedFile("builtins/os.js") },
+    .{ .name = "node:_crypto", .source = "", .native = true },
+    .{ .name = "node:crypto", .source = @embedFile("builtins/crypto.js") },
+    .{ .name = "node:_url", .source = "", .native = true },
+    .{ .name = "node:url", .source = @embedFile("builtins/url.js") },
+    .{ .name = "node:events", .source = @embedFile("builtins/events.js") },
 };
 
 const probing_suffixes = [_][]const u8{ "", ".js", ".mjs", "/index.js", "/index.mjs" };
@@ -193,6 +201,10 @@ fn loadNative(ctx: *quickjs.Context, name: []const u8) ?*quickjs.ModuleDef {
         process_native.initModule(ctx)
     else if (std.mem.eql(u8, name, "node:_encoding"))
         encoding_native.initModule(ctx)
+    else if (std.mem.eql(u8, name, "node:_crypto"))
+        crypto_native.initModule(ctx)
+    else if (std.mem.eql(u8, name, "node:_url"))
+        url_native.initModule(ctx)
     else
         null;
 

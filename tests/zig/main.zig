@@ -15,4 +15,9 @@ test {
     _ = @import("buffer_test.zig");
     _ = @import("jobs_test.zig");
     _ = @import("async_test.zig");
+    _ = @import("os_test.zig");
+    _ = @import("crypto_test.zig");
+    _ = @import("url_test.zig");
+    _ = @import("util_test.zig");
+    _ = @import("events_test.zig");
 }

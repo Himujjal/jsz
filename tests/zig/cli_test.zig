@@ -43,6 +43,18 @@ test "cli eval keeps trailing arguments as the argv tail" {
     try std.testing.expectEqualStrings("alpha,beta\n", result.stdout);
 }
 
+test "cli eval auto-detects module syntax" {
+    const allocator = std.testing.allocator;
+    const result = try run(allocator, &.{
+        exe, "-e", "import { join } from 'node:path'; import os from 'node:os'; console.log(join('a', 'b')); console.log(typeof os.cpus().length)",
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    try expectExit(result, 0);
+    try std.testing.expectEqualStrings("a/b\nnumber\n", result.stdout);
+}
+
 test "cli propagates the process.exit code after flushing stdout" {
     const allocator = std.testing.allocator;
     const script = try std.fs.path.resolveAlloc(allocator, &.{"tests/fixtures/process/exit-code.js"});

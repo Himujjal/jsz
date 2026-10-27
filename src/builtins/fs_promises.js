@@ -40,13 +40,8 @@ function unsupported(name) {
   };
 }
 
-export const mkdtemp = unsupported('fs.promises.mkdtemp');
-export const open = unsupported('fs.promises.open');
-export const close = unsupported('fs.promises.close');
-export const read = unsupported('fs.promises.read');
-export const write = unsupported('fs.promises.write');
-export const fsync = unsupported('fs.promises.fsync');
-export const fstat = unsupported('fs.promises.fstat');
+export const mkdtemp = promises.mkdtemp;
+export const open = promises.open;
 export const watch = unsupported('fs.promises.watch');
 
 export default promises;

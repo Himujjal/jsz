@@ -31,6 +31,8 @@ pub const Queue = struct {
     tail: ?*Job = null,
     pending: usize = 0,
     closed: bool = false,
+    /// Set by `notify` to release a blocked waiter (e.g. a signal arrived).
+    wake: bool = false,
 
     /// Creates an empty, open queue.
     pub fn init(allocator: std.mem.Allocator) Queue {
@@ -107,18 +109,37 @@ pub const Queue = struct {
         while (self.tryTake()) |job| job.settle(ctx, job);
     }
 
-    /// Waits for a completion. A null timeout blocks until one arrives.
+    /// Releases a blocked `wait` without enqueueing a job. Callable from any
+    /// thread or task; the flag stays set until `takeWake` consumes it.
+    pub fn notify(self: *Queue) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.wake = true;
+        self.cond.signal();
+    }
+
+    /// Consumes a pending wake-up signal.
+    pub fn takeWake(self: *Queue) bool {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const woke = self.wake;
+        self.wake = false;
+        return woke;
+    }
+
+    /// Waits for a completion or a wake-up. A null timeout blocks until either
+    /// arrives.
     pub fn wait(self: *Queue, timeout_ns: ?u64) void {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (self.head != null) return;
+        if (self.head != null or self.wake) return;
 
         if (timeout_ns) |ns| {
             if (ns == 0) return;
             self.cond.timedWait(&self.mutex, .fromNanoseconds(ns)) catch {};
         } else {
-            while (self.head == null) {
+            while (self.head == null and !self.wake) {
                 self.cond.wait(&self.mutex);
             }
         }

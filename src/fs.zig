@@ -24,6 +24,14 @@ pub const Op = enum {
     chown,
     utimes,
     hard_link,
+    mkdtemp,
+    open,
+    close,
+    read_fd,
+    write_fd,
+    fsync,
+    fstat,
+    ftruncate,
 };
 
 pub const ErrorCode = enum {
@@ -42,6 +50,7 @@ pub const ErrorCode = enum {
     emfile,
     enfile,
     eio,
+    ebadf,
 
     pub fn text(self: ErrorCode) [:0]const u8 {
         return switch (self) {
@@ -60,6 +69,7 @@ pub const ErrorCode = enum {
             .emfile => "EMFILE",
             .enfile => "ENFILE",
             .eio => "EIO",
+            .ebadf => "EBADF",
         };
     }
 
@@ -80,6 +90,7 @@ pub const ErrorCode = enum {
             .emfile => "too many open files",
             .enfile => "file table overflow",
             .eio => "i/o error",
+            .ebadf => "bad file descriptor",
         };
     }
 
@@ -100,6 +111,7 @@ pub const ErrorCode = enum {
             .eloop => -62,
             .enametoolong => -63,
             .enotempty => -66,
+            .ebadf => -9,
         };
     }
 };
@@ -128,6 +140,8 @@ pub const Outcome = union(enum) {
     stat: StatData,
     entries: []EntryData,
     path: [:0]u8,
+    fd: i32,
+    count: u64,
 };
 
 pub const Job = struct {
@@ -151,6 +165,15 @@ pub const Job = struct {
     gid: u32 = 0,
     atime_ms: f64 = 0,
     mtime_ms: f64 = 0,
+    /// Descriptor operations; `-1` means no descriptor was supplied.
+    fd: i32 = -1,
+    /// `-1` reads/writes at the descriptor's current offset.
+    position: i64 = -1,
+    append: bool = false,
+    readable: bool = false,
+    writable: bool = false,
+    create: bool = false,
+    truncate_on_open: bool = false,
     resolve: quickjs.Value = .undefined,
     reject: quickjs.Value = .undefined,
     outcome: Outcome = .none,
@@ -170,7 +193,7 @@ pub const Job = struct {
         if (self.path2_owned) allocator.free(self.path2);
         if (self.data_owned) allocator.free(self.data);
         switch (self.outcome) {
-            .none, .stat => {},
+            .none, .stat, .fd, .count => {},
             .bytes => |bytes| allocator.free(bytes),
             .text => |text| allocator.free(text),
             .path => |path| allocator.free(path),
@@ -413,9 +436,137 @@ pub const Fs = struct {
                 });
                 return .none;
             },
+            .mkdtemp => {
+                // zio owns the random suffix; the parent directory is the
+                // system temp dir, and `keep` stops `deinit` from deleting it.
+                var temp = try zio.createTempDir(.{ .prefix = job.path });
+                defer temp.deinit();
+
+                var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+                const resolved = try temp.parent.realPathFile(temp.name(), &buffer);
+                const path = try self.allocator.dupeSentinel(u8, resolved, 0);
+                temp.keep();
+                return .{ .path = path };
+            },
+            .open => {
+                const permissions: std.Io.File.Permissions = @fromBackingInt(@intCast(job.mode));
+                if (job.create) {
+                    const file = try cwd.createFile(self.io, job.path, .{
+                        .read = job.readable,
+                        .truncate = job.truncate_on_open,
+                        .exclusive = job.exclusive,
+                        .permissions = permissions,
+                    });
+                    return .{ .fd = file.handle };
+                }
+
+                const file = try cwd.openFile(self.io, job.path, .{
+                    .mode = if (job.writable) .read_write else .read_only,
+                });
+                return .{ .fd = file.handle };
+            },
+            .close => {
+                if (job.fd < 0) return error.BadFileDescriptor;
+                // `File.close` reports nothing, so a stale descriptor is only
+                // observable through the guarded JS wrapper.
+                wrapFd(job.fd).close(self.io);
+                return .none;
+            },
+            .read_fd => {
+                if (job.fd < 0) return error.BadFileDescriptor;
+                if (job.length > max_read_bytes) return error.FileTooBig;
+
+                const length: usize = @intCast(job.length);
+                const buffer = try self.allocator.allocSentinel(u8, length, 0);
+                errdefer self.allocator.free(buffer);
+                if (length == 0) return .{ .bytes = buffer };
+
+                const file = wrapFd(job.fd);
+                const count = if (job.position >= 0)
+                    try file.readPositional(self.io, &.{buffer}, @intCast(job.position))
+                else
+                    file.readStreaming(self.io, &.{buffer}) catch |err| switch (err) {
+                        error.EndOfStream => 0,
+                        else => return err,
+                    };
+
+                if (count == length) return .{ .bytes = buffer };
+
+                const short = try self.allocator.allocSentinel(u8, count, 0);
+                @memcpy(short[0..count], buffer[0..count]);
+                self.allocator.free(buffer);
+                return .{ .bytes = short };
+            },
+            .write_fd => {
+                if (job.fd < 0) return error.BadFileDescriptor;
+                if (job.data.len == 0) return .{ .count = 0 };
+
+                const file = wrapFd(job.fd);
+                const count = if (job.append) blk: {
+                    // Appending without O_APPEND: write at the current end of
+                    // the file. The runtime is single-threaded, so a stat per
+                    // write is enough to concatenate writes.
+                    const end = file.length(self.io) catch |err| switch (err) {
+                        error.Unexpected => return error.BadFileDescriptor,
+                        else => return err,
+                    };
+                    break :blk try file.writePositional(self.io, &.{job.data}, end);
+                } else if (job.position >= 0)
+                    try file.writePositional(self.io, &.{job.data}, @intCast(job.position))
+                else
+                    try file.writeStreaming(self.io, job.data, &.{}, 0);
+
+                return .{ .count = count };
+            },
+            .fsync => {
+                if (job.fd < 0) return error.BadFileDescriptor;
+                const file = wrapFd(job.fd);
+                // zio logs undocumented errnos for fsync/ftruncate, so check the
+                // descriptor first and report a clean EBADF instead.
+                try checkFd(file, self.io);
+                file.sync(self.io) catch |err| switch (err) {
+                    error.Unexpected => return error.BadFileDescriptor,
+                    else => return err,
+                };
+                return .none;
+            },
+            .fstat => {
+                if (job.fd < 0) return error.BadFileDescriptor;
+                const stat = wrapFd(job.fd).stat(self.io) catch |err| switch (err) {
+                    error.Unexpected => return error.BadFileDescriptor,
+                    else => return err,
+                };
+                return .{ .stat = statData(stat) };
+            },
+            .ftruncate => {
+                if (job.fd < 0) return error.BadFileDescriptor;
+                const file = wrapFd(job.fd);
+                try checkFd(file, self.io);
+                file.setLength(self.io, job.length) catch |err| switch (err) {
+                    error.Unexpected => return error.BadFileDescriptor,
+                    else => return err,
+                };
+                return .none;
+            },
         }
     }
 };
+
+/// Wraps a raw descriptor so `std.Io.File` operations work inside the I/O task.
+/// The handle is borrowed: the wrapper never outlives the single syscall and the
+/// descriptor stays owned by the JS wrapper.
+fn wrapFd(fd: std.Io.File.Handle) std.Io.File {
+    return .{ .handle = fd, .flags = .{ .nonblocking = false } };
+}
+
+/// `stat` is the cheapest zio call that reports a closed descriptor as
+/// `error.Unexpected` without logging an undocumented errno.
+fn checkFd(file: std.Io.File, io: std.Io) !void {
+    _ = file.stat(io) catch |err| switch (err) {
+        error.Unexpected => return error.BadFileDescriptor,
+        else => |e| return e,
+    };
+}
 
 fn lessThanEntry(_: void, a: EntryData, b: EntryData) bool {
     return std.mem.lessThan(u8, a.name, b.name);
@@ -507,6 +658,7 @@ fn mapError(err: anyerror) ErrorCode {
         error.ReadOnlyFileSystem => .erofs,
         error.ProcessFdQuotaExceeded => .emfile,
         error.SystemFdQuotaExceeded => .enfile,
+        error.BadFileDescriptor, error.NotOpenForReading, error.NotOpenForWriting => .ebadf,
         else => .eio,
     };
 }
@@ -519,6 +671,8 @@ fn toValue(ctx: *quickjs.Context, job: *Job) !quickjs.Value {
         .path => |path| quickjs.Value.initStringLen(ctx, path),
         .stat => |stat| statValue(ctx, stat),
         .entries => |entries| entriesValue(ctx, entries),
+        .fd => |fd| quickjs.Value.initInt32(fd),
+        .count => |count| quickjs.Value.initFloat64(@floatFromInt(count)),
     };
 }
 
@@ -567,11 +721,19 @@ fn kindName(kind: std.Io.File.Kind) [:0]const u8 {
 
 fn makeError(ctx: *quickjs.Context, code: ErrorCode, job: *Job) quickjs.Value {
     var buffer: [1024]u8 = undefined;
-    const message: []const u8 = std.fmt.bufPrint(
-        &buffer,
-        "{s}: {s}, {s} '{s}'",
-        .{ code.text(), code.message(), opSyscall(job.op), job.path },
-    ) catch code.message();
+    const has_path = job.path.len > 0;
+    const message: []const u8 = if (has_path)
+        std.fmt.bufPrint(
+            &buffer,
+            "{s}: {s}, {s} '{s}'",
+            .{ code.text(), code.message(), opSyscall(job.op), job.path },
+        ) catch code.message()
+    else
+        std.fmt.bufPrint(
+            &buffer,
+            "{s}: {s}, {s}",
+            .{ code.text(), code.message(), opSyscall(job.op) },
+        ) catch code.message();
 
     const global = ctx.getGlobalObject();
     defer global.deinit(ctx);
@@ -600,7 +762,9 @@ fn makeError(ctx: *quickjs.Context, code: ErrorCode, job: *Job) quickjs.Value {
     error_object.setPropertyStr(ctx, "code", quickjs.Value.initString(ctx, code.text())) catch {};
     error_object.setPropertyStr(ctx, "errno", quickjs.Value.initInt32(code.errno())) catch {};
     error_object.setPropertyStr(ctx, "syscall", quickjs.Value.initString(ctx, opSyscall(job.op))) catch {};
-    error_object.setPropertyStr(ctx, "path", quickjs.Value.initStringLen(ctx, job.path)) catch {};
+    if (has_path) {
+        error_object.setPropertyStr(ctx, "path", quickjs.Value.initStringLen(ctx, job.path)) catch {};
+    }
     return error_object;
 }
 
@@ -623,5 +787,13 @@ fn opSyscall(op: Op) [:0]const u8 {
         .chown => "chown",
         .utimes => "utime",
         .hard_link => "link",
+        .mkdtemp => "mkdtemp",
+        .open => "open",
+        .close => "close",
+        .read_fd => "read",
+        .write_fd => "write",
+        .fsync => "fsync",
+        .fstat => "fstat",
+        .ftruncate => "ftruncate",
     };
 }

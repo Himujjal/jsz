@@ -3,6 +3,11 @@ const quickjs = @import("quickjs");
 const zio = @import("zio");
 const Fs = @import("fs.zig").Fs;
 
+const UnhandledRejection = struct {
+    promise: quickjs.Value,
+    reason: quickjs.Value,
+};
+
 pub const Timer = struct {
     id: u64,
     deadline_ns: u64,
@@ -32,6 +37,21 @@ pub const EventLoop = struct {
     /// Node-style "keeps the process alive" counter for live I/O handles.
     ref_count: usize = 0,
     exit_code: u8 = 0,
+    /// `process.on('exit')` trampoline; runs once before shutdown.
+    exit_hook: ?quickjs.Value = null,
+    /// `process.on('SIGINT')` trampoline; null means exit 130.
+    sigint_hook: ?quickjs.Value = null,
+    /// `process.on('uncaughtException')` trampoline; null keeps the old
+    /// report-and-fail behavior.
+    uncaught_hook: ?quickjs.Value = null,
+    /// A watcher is always wanted: it turns SIGINT into exit 130 when no JS
+    /// listener exists (background children inherit SIGINT ignored).
+    sigint_wanted: bool = true,
+    /// Written by the zio signal task, consumed by the JS task.
+    interrupted: std.atomic.Value(bool) = .init(false),
+    /// Rejected promises that had no handler when the job queue drained.
+    rejections: std.ArrayList(UnhandledRejection) = .empty,
+    exit_hooks_ran: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -51,6 +71,15 @@ pub const EventLoop = struct {
         for (self.list.items) |timer| self.destroyTimer(timer);
         self.list.deinit(self.allocator);
         self.timers.deinit();
+
+        if (self.exit_hook) |hook| hook.deinit(self.ctx);
+        if (self.sigint_hook) |hook| hook.deinit(self.ctx);
+        if (self.uncaught_hook) |hook| hook.deinit(self.ctx);
+        for (self.rejections.items) |entry| {
+            entry.promise.deinit(self.ctx);
+            entry.reason.deinit(self.ctx);
+        }
+        self.rejections.deinit(self.allocator);
     }
 
     pub fn schedule(
@@ -121,6 +150,110 @@ pub const EventLoop = struct {
         self.stopped = true;
     }
 
+    /// Called by the zio signal task. Wakes a blocked loop without touching
+    /// QuickJS; the JS task handles the signal on its next iteration.
+    pub fn interrupt(self: *EventLoop) void {
+        self.interrupted.store(true, .release);
+        if (self.fs) |fs| fs.queue.notify();
+    }
+
+    fn takeInterrupt(self: *EventLoop) bool {
+        return self.interrupted.swap(false, .acquire);
+    }
+
+    fn handleSigint(self: *EventLoop) void {
+        const hook = self.sigint_hook orelse {
+            self.exit_code = 130;
+            self.stopped = true;
+            return;
+        };
+
+        const result = hook.call(self.ctx, .undefined, &.{});
+        defer result.deinit(self.ctx);
+        if (result.isException()) _ = self.handleUncaught();
+    }
+
+    /// Runs `process.on('exit')` once, in registration order (the JS trampoline
+    /// owns the ordering). Exceptions are printed and never propagated.
+    pub fn runExitHooks(self: *EventLoop, code: u8) void {
+        if (self.exit_hooks_ran) return;
+        self.exit_hooks_ran = true;
+
+        const hook = self.exit_hook orelse return;
+        const code_value = quickjs.Value.initInt32(@intCast(code));
+        const result = hook.call(self.ctx, .undefined, &.{code_value});
+        defer result.deinit(self.ctx);
+        if (result.isException()) self.reportException();
+    }
+
+    /// Called by the promise rejection tracker. Entries are keyed by promise
+    /// identity; a later handler clears the pending warning.
+    pub fn trackRejection(
+        self: *EventLoop,
+        promise: quickjs.Value,
+        reason: quickjs.Value,
+        is_handled: bool,
+    ) void {
+        const wanted = valuePtr(promise);
+        for (self.rejections.items, 0..) |entry, index| {
+            if (valuePtr(entry.promise) != wanted) continue;
+            if (is_handled) {
+                var removed = self.rejections.swapRemove(index);
+                removed.promise.deinit(self.ctx);
+                removed.reason.deinit(self.ctx);
+            }
+            return;
+        }
+        if (is_handled) return;
+
+        const entry: UnhandledRejection = .{
+            .promise = promise.dup(self.ctx),
+            .reason = reason.dup(self.ctx),
+        };
+        self.rejections.append(self.allocator, entry) catch {
+            entry.promise.deinit(self.ctx);
+            entry.reason.deinit(self.ctx);
+        };
+    }
+
+    /// Drops pending warnings for `reason`; used when the host reports a
+    /// module-evaluation rejection as an uncaught exception.
+    pub fn discardRejectionsFor(self: *EventLoop, reason: quickjs.Value) void {
+        var index: usize = 0;
+        while (index < self.rejections.items.len) {
+            const entry = self.rejections.items[index];
+            if (!sameReason(self.ctx, entry.reason, reason)) {
+                index += 1;
+                continue;
+            }
+            var removed = self.rejections.swapRemove(index);
+            removed.promise.deinit(self.ctx);
+            removed.reason.deinit(self.ctx);
+        }
+    }
+
+    /// Prints one warning per still-unhandled rejection and makes the exit code
+    /// non-zero unless JS already chose one.
+    pub fn reportUnhandledRejections(self: *EventLoop) void {
+        for (self.rejections.items) |entry| {
+            self.appendOut("UnhandledPromiseRejectionWarning: ");
+            const text = entry.reason.toStringValue(self.ctx);
+            if (text.isException()) {
+                const pending = self.ctx.getException();
+                pending.deinit(self.ctx);
+            } else {
+                if (text.toCString(self.ctx)) |cstr| {
+                    defer self.ctx.freeCString(cstr);
+                    self.appendOut(std.mem.span(cstr));
+                }
+                text.deinit(self.ctx);
+            }
+            self.appendOut("\n");
+        }
+
+        if (self.rejections.items.len > 0 and self.exit_code == 0) self.exit_code = 1;
+    }
+
     /// Marks a live handle; the loop keeps running while any ref is held.
     pub fn ref(self: *EventLoop) void {
         self.ref_count += 1;
@@ -139,11 +272,21 @@ pub const EventLoop = struct {
     pub fn run(self: *EventLoop) !void {
         while (!self.stopped) {
             try self.checkLimits();
+            if (self.takeInterrupt()) {
+                self.handleSigint();
+                if (self.stopped) break;
+            }
             self.drainJobs() catch |err| {
                 self.failed = true;
                 return err;
             };
+            // Settling fs work enqueues promise jobs; run them before deciding
+            // whether the loop has any work left.
             self.dispatchFs();
+            self.drainJobs() catch |err| {
+                self.failed = true;
+                return err;
+            };
 
             const deadline = self.nextDeadline();
             const fs_pending = if (self.fs) |fs| fs.hasWork() else false;
@@ -154,6 +297,9 @@ pub const EventLoop = struct {
                 if (next > current) {
                     if (fs_pending) {
                         self.fs.?.wait(next - current);
+                    } else if (self.sigint_wanted) {
+                        // The queue is the only wait a zio signal task can wake.
+                        self.waitForWake(next - current);
                     } else {
                         zio.sleep(.fromNanoseconds(next - current)) catch |err| {
                             self.failed = true;
@@ -188,6 +334,13 @@ pub const EventLoop = struct {
         }
 
         self.dispatchFs();
+        // process.exit must not run handlers for work that was still queued.
+        if (!self.stopped) {
+            self.drainJobs() catch |err| {
+                self.failed = true;
+                return err;
+            };
+        }
         if (self.failed) return error.JavaScriptError;
     }
 
@@ -205,19 +358,60 @@ pub const EventLoop = struct {
         if (self.fs) |fs| fs.dispatch(self.ctx);
     }
 
+    fn waitForWake(self: *EventLoop, timeout_ns: ?u64) void {
+        if (self.fs) |fs| {
+            fs.wait(timeout_ns);
+        } else if (timeout_ns) |ns| {
+            zio.sleep(.fromNanoseconds(ns)) catch {};
+        }
+    }
+
     pub fn drainJobs(self: *EventLoop) !void {
         while (self.js_rt.isJobPending()) {
-            _ = self.js_rt.executePendingJob() catch |err| {
-                self.reportException();
-                return err;
+            _ = self.js_rt.executePendingJob() catch {
+                if (!self.handleUncaught()) return error.JavaScriptError;
             };
         }
+    }
+
+    /// Reports an uncaught exception and forwards it to the JS trampoline when
+    /// one is installed. Returns true when the exception was handled and the
+    /// loop may continue.
+    pub fn handleUncaught(self: *EventLoop) bool {
+        const exception = self.ctx.getException();
+        defer exception.deinit(self.ctx);
+        return self.handleUncaughtValue(exception);
+    }
+
+    /// Same as `handleUncaught`, for a value that is not the pending context
+    /// exception (module evaluation reports failures through its promise).
+    pub fn handleUncaughtValue(self: *EventLoop, exception: quickjs.Value) bool {
+        self.reportValue(exception);
+
+        const hook = self.uncaught_hook orelse {
+            self.stopped = true;
+            self.failed = true;
+            return false;
+        };
+
+        const result = hook.call(self.ctx, .undefined, &.{exception});
+        defer result.deinit(self.ctx);
+        if (result.isException()) {
+            self.reportException();
+            self.stopped = true;
+            self.failed = true;
+            return false;
+        }
+        return true;
     }
 
     pub fn reportException(self: *EventLoop) void {
         const exception = self.ctx.getException();
         defer exception.deinit(self.ctx);
+        self.reportValue(exception);
+    }
 
+    fn reportValue(self: *EventLoop, exception: quickjs.Value) void {
         const name = exception.getPropertyStr(self.ctx, "name");
         defer name.deinit(self.ctx);
         const message = exception.getPropertyStr(self.ctx, "message");
@@ -348,10 +542,7 @@ pub const EventLoop = struct {
         if (timer.resolve) |resolve| {
             const result = resolve.call(self.ctx, .undefined, &.{});
             defer result.deinit(self.ctx);
-            if (result.isException()) {
-                self.reportException();
-                return error.JavaScriptError;
-            }
+            if (result.isException() and !self.handleUncaught()) return error.JavaScriptError;
 
             resolve.deinit(self.ctx);
             timer.resolve = null;
@@ -367,10 +558,7 @@ pub const EventLoop = struct {
         const callback = timer.callback orelse return;
         const result = callback.call(self.ctx, .undefined, timer.args orelse &.{});
         defer result.deinit(self.ctx);
-        if (result.isException()) {
-            self.reportException();
-            return error.JavaScriptError;
-        }
+        if (result.isException() and !self.handleUncaught()) return error.JavaScriptError;
 
         try self.drainJobs();
     }
@@ -421,6 +609,35 @@ pub const EventLoop = struct {
         }
     }
 };
+
+/// Stable identity for object values (promises): the carried pointer.
+fn valuePtr(value: quickjs.Value) ?*anyopaque {
+    return quickjs.c.JS_VALUE_GET_PTR(value.cval());
+}
+
+/// Compares rejection reasons without invoking JS; objects and strings use
+/// identity, primitives use their value.
+fn sameReason(ctx: *quickjs.Context, a: quickjs.Value, b: quickjs.Value) bool {
+    if (a.isObject() or a.isString()) {
+        if (!(b.isObject() or b.isString())) return false;
+        return valuePtr(a) == valuePtr(b);
+    }
+    if (a.isNumber() and b.isNumber()) {
+        const left = a.toFloat64(ctx) catch return false;
+        const right = b.toFloat64(ctx) catch return false;
+        return left == right;
+    }
+    if (a.isBool() and b.isBool()) {
+        const left = a.toBool(ctx) catch return false;
+        const right = b.toBool(ctx) catch return false;
+        return left == right;
+    }
+    if (a.isUndefined()) return b.isUndefined();
+    if (a.isNull()) return b.isNull();
+    if (a.isBigInt() and b.isBigInt()) return valuePtr(a) == valuePtr(b);
+    if (a.isSymbol() and b.isSymbol()) return valuePtr(a) == valuePtr(b);
+    return false;
+}
 
 fn now() u64 {
     return zio.now().toNanoseconds();

@@ -1,6 +1,6 @@
 # jsz Node.js 90% compatibility plan
 
-Status: draft for implementation
+Status: Phases 0, 1, 2, 3A, 3B implemented; see §15 Backlog
 Target runtime: Zig 0.17.0, QuickJS-ng (pinned in `build.zig.zon`), zio 0.19.0
 Target Node semantics: Node.js 22 LTS, POSIX first, Windows best-effort
 
@@ -1637,6 +1637,7 @@ Open questions:
 ## 12. Appendix A - coverage matrix
 
 Legend: `now` = exists today, `plan` = in this plan, `defer` = last 10%.
+Statuses are the plan-time snapshot; live status and open work are in §15.
 
 | API | Status | Phase |
 | --- | --- | --- |
@@ -1728,3 +1729,110 @@ jsz script.mjs
   `structuredClone`, `AbortController`, `fetch`, `atob`, and `btoa`. It does
   provide `queueMicrotask`. This is why those globals are part of the plan
   rather than assumed.
+
+---
+
+## 15. Backlog
+
+Status snapshot for this section (2026-10-27):
+
+- Phase 0 (module foundation) and Phase 1 (async core, encoding, Buffer) are
+  complete.
+- Phase 2 (filesystem) is complete: every path-based API in §7.2, `mkdtemp`,
+  and the descriptor-based API (`open`/`close`/`read`/`write`/`fsync`/
+  `fstat`/`ftruncate`, `fs.promises.open` + `FileHandle`) are implemented. The
+  remaining fs gaps are follow-ups, not stubs (§15.1).
+- Phase 3A (`process`, `os`, `crypto`) and Phase 3B (`path`, `url`, `util`,
+  `events`) are implemented with the deviations listed in §15.2 and §15.3.
+  Process lifecycle (`exit`, `SIGINT`, `uncaughtException`, `exitCode`) and
+  unhandled-rejection reporting are also implemented (§15.2).
+- Phases 4 (`child_process`), 5 (`http`/`fetch`) and 6 (fidelity/hardening)
+  have not started.
+
+This section is the single list of work intentionally left undone. Each item
+names the phase that should pick it up and a priority:
+
+- **P1** - required to close the phase or to avoid a correctness surprise.
+- **P2** - Node parity gap that real code can hit.
+- **P3** - cleanup, refactor, or documentation.
+
+### 15.1 Phase 2 follow-ups (filesystem)
+
+| Item | Current state | Next step | Priority |
+| --- | --- | --- | --- |
+| `readdir({ recursive: true })` | not implemented; `cp` has its own recursion | Add a recursive walk in `node:_fs` once `Dirent` traversal is stable | P2 |
+| `fs.opendir` | deferred | Requires a `Dir` handle lifetime across calls; revisit with the fd work | P2 |
+| `fs.watch`, `watchFile`, `createReadStream`, `createWriteStream` | explicit `ERR_METHOD_NOT_IMPLEMENTED` | Stay deferred with the stream work (last 10%) | P3 |
+| `cp` option fidelity | `preserveTimestamps` not implemented; mode bits best-effort | Add `preserveTimestamps` if a fixture needs it | P3 |
+| `existsSync` | deliberately absent | Keep absent; document in the README compatibility table | P3 |
+| fd deviations | string flags only (no numeric `O_*`); `position` is an integer or `null`; `a`/`a+` is seek-to-end, not atomic `O_APPEND`; `fs.close(0\|1\|2)` is `EBADF`; `mkdtemp` always uses `os.tmpdir()` and a 16-hex suffix | Convert numeric flags (`constants.O_*`) and use real `O_APPEND` when `std.Io.File` exposes it | P2 |
+
+### 15.2 Phase 3A follow-ups (`process`, `os`, `crypto`)
+
+| Item | Current state | Next step | Priority |
+| --- | --- | --- | --- |
+| Signal coverage | only `SIGINT` is watched (`zio.Signal.init(.interrupt)`); `SIGTERM`/`SIGHUP` use the OS default | Generalize the watcher to a per-signal registry (`terminate`, `hangup`, `user1`, `user2`) | P2 |
+| Unhandled rejections | prints `UnhandledPromiseRejectionWarning: <reason>` and exits 1 | Node 22 defaults to throwing `ERR_UNHANDLED_REJECTION`; match that or add `--unhandled-rejections` | P2 |
+| `process.stdin` | absent | Deferred with `readline`; needs a non-blocking stdin reader on the loop | P3 |
+| `process.memoryUsage()` heap fields | `heapTotal`/`heapUsed`/`external`/`arrayBuffers` are `0`; `rss` is real | QuickJS does not expose its allocator; revisit only if QuickJS-ng adds stats | P3 |
+| `process.nextTick` ordering | implemented as `queueMicrotask` | QuickJS has one job queue; nextTick cannot preempt promise reactions. Document the ordering difference | P2 |
+| `process.emitWarning` formatting | approximate `(node:<pid>) [<code>] <Type>: <msg>` | Match Node's exact prefix once stderr is stable | P3 |
+| `process.execPath` | `std.process.executablePathAlloc`, falling back to `argv[0]` | Verify against symlinked installs and `bun`/`node` style shims | P3 |
+| `os.freemem()` | omitted | Implement with libc `sysctl`/`sysinfo` per OS, or keep omitted and document | P3 |
+| `os.networkInterfaces()` | omitted | No std API; needs libc `getifaddrs` + address formatting | P3 |
+| `os.cpus()` counters | synthetic: `model: "unknown"`, `speed: 0`, zero `times` | Correct length only; per-core counters need libc | P3 |
+| `os.userInfo()` | derived from env (`USER`/`LOGNAME`/`SHELL`) + `getuid`/`getgid` | Use `getpwuid_r` for `username`/`homedir`/`shell` when libc is linked | P3 |
+| `crypto` HMAC error code | unknown algorithm reports `ERR_CRYPTO_HASH_UNKNOWN` | Node 22 HMAC uses `ERR_CRYPTO_INVALID_DIGEST`; split the codes | P2 |
+| `crypto.getRandomValues` quota error | plain `Error` named `QuotaExceededError`, `.code = ERR_OUT_OF_RANGE` | Node throws a `DOMException`; QuickJS has no `DOMException` class, so either ship a shim or document | P3 |
+| `Hmac#copy()` | implemented although Node 22 lacks it | Harmless superset; keep or remove for parity | P3 |
+| `pbkdf2Sync`, `scryptSync` | not implemented (stretch) | `std.crypto.pwhash`; defer until a caller needs it | P3 |
+| `webcrypto.subtle` | shim that throws `ERR_METHOD_NOT_IMPLEMENTED` | Last 10%; needs native key/cipher support | P3 |
+| `os` native helpers | live in `node:_process` (`osPlatform` … `osTotalmem`) | Split into `node:_os` + `src/js/os.zig` if `node:_process` keeps growing | P3 |
+
+### 15.3 Phase 3B follow-ups (`path`, `url`, `util`, `events`)
+
+| Item | Current state | Next step | Priority |
+| --- | --- | --- | --- |
+| `path.matchesGlob` | omitted (needs minimatch semantics) | Implement a small matcher or document the omission in the README table | P3 |
+| `path.win32` on a Windows host | pure string logic, exercised only on POSIX | Add Windows CI or a `@hasDecl` guarded test matrix | P3 |
+| `URL` IDNA / punycode | non-ASCII hosts stay percent-encoded; no `domainToASCII`/`domainToUnicode` | Punycode is out of the 90% set; document | P3 |
+| Legacy `url.parse`/`format`/`resolve` | not implemented | Deprecated in Node; keep omitted | P3 |
+| `url.urlToHttpOptions` | not implemented | Trivial once `http.request` lands (Phase 5) | P3 |
+| `fileURLToPath` edge cases | POSIX only: no drive letters, encoded NUL rejected (Node allows it) | Add Windows drive handling with the Windows work | P2 |
+| `node:_url` | empty native stub; helpers are pure JS | Delete the registry entry, or move `pathToFileURL`/`fileURLToPath` percent-encoding there if JS becomes a bottleneck | P3 |
+| `util.inspect` fidelity | `[Circular]` instead of `<ref *1>`, Error prints the stack head, Promise always `<pending>`, `ArrayBuffer` prints `ByteLength`, `%j` on BigInt falls back to `[Circular]`, simplified wrapping | Improve only where fixtures or users depend on the exact shape | P3 |
+| `util.parseArgs` | not implemented (stretch) | Add when a builtin or example needs it | P3 |
+| `events.on(emitter, name)` | async iterator not implemented (stretch) | Needed by `readline`/streams later; `events.once` is done | P3 |
+| `util.deprecate` output | writes via `process.stderr` when present | Re-check after `process.on` and stderr hooks land | P3 |
+
+### 15.4 Globals, runtime, and module system
+
+| Item | Current state | Next step | Priority |
+| --- | --- | --- | --- |
+| `performance` global | absent | `{ now(), timeOrigin }` over `zio.now()` | P2 |
+| `globalThis.global` | absent | Alias `globalThis` (Node compat) | P3 |
+| `structuredClone` | deferred | QuickJS lacks it; implement over JSON only for plain data, or keep deferred | P3 |
+| `console` extras | `log`/`error` only | Add `info`, `warn`, `debug`, `trace`, `dir`, `time`/`timeEnd` over the shared writer | P2 |
+| `import.meta.resolve` | not implemented | Needs a synchronous resolver; document as unsupported | P3 |
+| Dynamic `import()` from a timer callback | works in principle, not covered by a regression test | Add a Phase 0 regression fixture (the loader suspends the JS task) | P1 |
+| `-e` module detection | fixed during 3B (`Runtime.evalDetected`) | Add more CLI cases (`.cjs`, syntax errors) | P3 |
+
+### 15.5 Deferred last 10% (unchanged)
+
+Full streams, `http.request`/`http.get`, `https.*` (including
+`https.createServer`), TLS server, `net`, `tls`, `dns`, `zlib`,
+`worker_threads`, `readline`, `assert`, `child_process.fork`,
+`webcrypto.subtle`, ciphers/key generation/signing, `fs.watch`.
+
+`crypto.timingSafeEqual` moved out of this list: it is implemented in Phase 3A
+and should be marked `now` when Appendix A is refreshed.
+
+### 15.6 Testing and documentation
+
+| Item | Current state | Next step | Priority |
+| --- | --- | --- | --- |
+| Node-test porting for 3A/3B | curated fixtures only for the implemented surface | Extend the §10.1 mapping (`test-process-*`, `test-os-*`, `test-crypto-*`, `test-path-*`, `test-url-*`, `test-util-*`, `test-events-*`) | P2 |
+| Differential tests vs Node | `path` was diffed manually during 3B (60 cases, byte-identical) | Add an optional, skipped-when-absent `node` differential test for `path`, `url`, `util.format`, and `Buffer` encodings | P2 |
+| Appendix A accuracy | statuses are the plan-time snapshot | Refresh to `now`/`plan`/`defer` at Phase 6 | P2 |
+| Docs | plan only | Update `docs/roadmap.md`, `docs/testing.md`, and the README compatibility table, including async-only `fs`, `-e` module detection, and the global set | P2 |
+| Leak `std.testing.allocator` coverage | green for the current suite | Keep extending to every native entry, including error paths | P3 |

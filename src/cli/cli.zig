@@ -86,7 +86,7 @@ pub fn run(init: std.process.Init) !u8 {
 }
 
 fn runSource(runtime: *jsz.Runtime, source: []const u8, filename: [:0]const u8) !u8 {
-    const value = runtime.eval(source, filename) catch |err| {
+    const value = runtime.evalDetected(source, filename) catch |err| {
         try runtime.flush();
         return err;
     };

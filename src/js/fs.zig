@@ -112,6 +112,81 @@ fn argF64(ctx: *quickjs.Context, args: []const quickjs.c.JSValue, index: usize, 
     return value.toFloat64(ctx) catch default;
 }
 
+/// JS numbers above `2^53` cannot be integers, so clamping there avoids
+/// trapping `@intFromFloat` without losing a representable value.
+fn floatToInt(comptime T: type, number: f64) ?T {
+    if (!std.math.isFinite(number)) return null;
+    if (number < -9007199254740992 or number > 9007199254740992) return null;
+    return @intFromFloat(number);
+}
+
+fn argI64(ctx: *quickjs.Context, args: []const quickjs.c.JSValue, index: usize, default: i64) i64 {
+    const value = argValue(args, index);
+    if (!value.isNumber()) return default;
+    const number = value.toFloat64(ctx) catch return default;
+    return floatToInt(i64, number) orelse default;
+}
+
+/// Native surface already validated by `fs.js`; this only rejects flags the
+/// syscall layer cannot express so a typo never silently picks a mode.
+const OpenSpec = struct {
+    readable: bool = false,
+    writable: bool = false,
+    create: bool = false,
+    truncate: bool = false,
+    exclusive: bool = false,
+    append: bool = false,
+};
+
+const flag_table = [_]struct { name: [:0]const u8, spec: OpenSpec }{
+    .{ .name = "r", .spec = .{ .readable = true } },
+    .{ .name = "r+", .spec = .{ .readable = true, .writable = true } },
+    .{ .name = "rs", .spec = .{ .readable = true } },
+    .{ .name = "rs+", .spec = .{ .readable = true, .writable = true } },
+    .{ .name = "w", .spec = .{ .writable = true, .create = true, .truncate = true } },
+    .{ .name = "wx", .spec = .{ .writable = true, .create = true, .truncate = true, .exclusive = true } },
+    .{ .name = "xw", .spec = .{ .writable = true, .create = true, .truncate = true, .exclusive = true } },
+    .{ .name = "w+", .spec = .{ .readable = true, .writable = true, .create = true, .truncate = true } },
+    .{ .name = "wx+", .spec = .{ .readable = true, .writable = true, .create = true, .truncate = true, .exclusive = true } },
+    .{ .name = "xw+", .spec = .{ .readable = true, .writable = true, .create = true, .truncate = true, .exclusive = true } },
+    .{ .name = "a", .spec = .{ .writable = true, .create = true, .append = true } },
+    .{ .name = "ax", .spec = .{ .writable = true, .create = true, .append = true, .exclusive = true } },
+    .{ .name = "xa", .spec = .{ .writable = true, .create = true, .append = true, .exclusive = true } },
+    .{ .name = "a+", .spec = .{ .readable = true, .writable = true, .create = true, .append = true } },
+    .{ .name = "ax+", .spec = .{ .readable = true, .writable = true, .create = true, .append = true, .exclusive = true } },
+    .{ .name = "xa+", .spec = .{ .readable = true, .writable = true, .create = true, .append = true, .exclusive = true } },
+    .{ .name = "as", .spec = .{ .writable = true, .create = true, .append = true } },
+    .{ .name = "as+", .spec = .{ .readable = true, .writable = true, .create = true, .append = true } },
+};
+
+fn parseOpenSpec(flag: []const u8) ?OpenSpec {
+    for (flag_table) |entry| {
+        if (std.mem.eql(u8, flag, entry.name)) return entry.spec;
+    }
+    return null;
+}
+
+fn throwInvalidArgValue(
+    ctx: *quickjs.Context,
+    comptime fmt: []const u8,
+    args: anytype,
+) Value {
+    var buffer: [256]u8 = undefined;
+    const message = std.fmt.bufPrintSentinel(&buffer, fmt, args, 0) catch "Invalid argument";
+    const error_value = ctx.newTypeError(message);
+    error_value.setPropertyStr(ctx, "code", Value.initString(ctx, "ERR_INVALID_ARG_VALUE")) catch {};
+    return error_value.throw(ctx);
+}
+
+fn argFd(ctx: *quickjs.Context, args: []const quickjs.c.JSValue, index: usize) i32 {
+    const value = argValue(args, index);
+    if (!value.isNumber()) return -1;
+    const number = value.toFloat64(ctx) catch return -1;
+    const fd = floatToInt(i32, number) orelse return -1;
+    if (fd < 0) return -1;
+    return fd;
+}
+
 fn submitJob(host: *Host, ctx: *quickjs.Context, job: fs.Job) Value {
     const promise = Value.initPromiseCapability(ctx);
 
@@ -365,6 +440,103 @@ fn utimes(ctx_opt: ?*quickjs.Context, _: Value, args: []const quickjs.c.JSValue)
     });
 }
 
+fn mkdtemp(ctx_opt: ?*quickjs.Context, _: Value, args: []const quickjs.c.JSValue) Value {
+    const ctx = ctx_opt orelse return .undefined;
+    const host = hostOf(ctx) orelse return .undefined;
+    const prefix = argString(host, ctx, args, 0, "prefix") orelse return .undefined;
+    return submitJob(host, ctx, .{ .op = .mkdtemp, .path = prefix });
+}
+
+fn open(ctx_opt: ?*quickjs.Context, _: Value, args: []const quickjs.c.JSValue) Value {
+    const ctx = ctx_opt orelse return .undefined;
+    const host = hostOf(ctx) orelse return .undefined;
+
+    const path = argString(host, ctx, args, 0, "path") orelse return .undefined;
+
+    const value = argValue(args, 1);
+    if (!value.isString()) {
+        host.allocator.free(path);
+        return ctx.throwTypeError("The \"flags\" argument must be of type string");
+    }
+
+    const slice = value.toZigSlice(ctx) orelse {
+        host.allocator.free(path);
+        return ctx.throwInternalError("failed to read flags argument");
+    };
+    defer ctx.freeCString(slice.ptr);
+
+    const spec = parseOpenSpec(slice) orelse {
+        host.allocator.free(path);
+        return throwInvalidArgValue(ctx, "The value \"{s}\" is invalid for option \"flags\"", .{slice});
+    };
+
+    return submitJob(host, ctx, .{
+        .op = .open,
+        .path = path,
+        .mode = argU32(ctx, args, 2, 0o666),
+        .readable = spec.readable,
+        .writable = spec.writable,
+        .create = spec.create,
+        .truncate_on_open = spec.truncate,
+        .exclusive = spec.exclusive,
+        .append = spec.append,
+    });
+}
+
+fn close(ctx_opt: ?*quickjs.Context, _: Value, args: []const quickjs.c.JSValue) Value {
+    const ctx = ctx_opt orelse return .undefined;
+    const host = hostOf(ctx) orelse return .undefined;
+    return submitJob(host, ctx, .{ .op = .close, .fd = argFd(ctx, args, 0) });
+}
+
+fn read(ctx_opt: ?*quickjs.Context, _: Value, args: []const quickjs.c.JSValue) Value {
+    const ctx = ctx_opt orelse return .undefined;
+    const host = hostOf(ctx) orelse return .undefined;
+    return submitJob(host, ctx, .{
+        .op = .read_fd,
+        .fd = argFd(ctx, args, 0),
+        .length = argU64(ctx, args, 1, 0),
+        .position = argI64(ctx, args, 2, -1),
+    });
+}
+
+fn writeFd(ctx_opt: ?*quickjs.Context, _: Value, args: []const quickjs.c.JSValue) Value {
+    const ctx = ctx_opt orelse return .undefined;
+    const host = hostOf(ctx) orelse return .undefined;
+
+    const data = argData(host, ctx, args, 1) orelse return .undefined;
+    return submitJob(host, ctx, .{
+        .op = .write_fd,
+        .fd = argFd(ctx, args, 0),
+        .data = data,
+        .data_owned = true,
+        .position = argI64(ctx, args, 2, -1),
+        .append = argBool(ctx, args, 3, false),
+    });
+}
+
+fn fsync(ctx_opt: ?*quickjs.Context, _: Value, args: []const quickjs.c.JSValue) Value {
+    const ctx = ctx_opt orelse return .undefined;
+    const host = hostOf(ctx) orelse return .undefined;
+    return submitJob(host, ctx, .{ .op = .fsync, .fd = argFd(ctx, args, 0) });
+}
+
+fn fstat(ctx_opt: ?*quickjs.Context, _: Value, args: []const quickjs.c.JSValue) Value {
+    const ctx = ctx_opt orelse return .undefined;
+    const host = hostOf(ctx) orelse return .undefined;
+    return submitJob(host, ctx, .{ .op = .fstat, .fd = argFd(ctx, args, 0) });
+}
+
+fn ftruncate(ctx_opt: ?*quickjs.Context, _: Value, args: []const quickjs.c.JSValue) Value {
+    const ctx = ctx_opt orelse return .undefined;
+    const host = hostOf(ctx) orelse return .undefined;
+    return submitJob(host, ctx, .{
+        .op = .ftruncate,
+        .fd = argFd(ctx, args, 0),
+        .length = argU64(ctx, args, 1, 0),
+    });
+}
+
 const Export = struct {
     name: [:0]const u8,
     func: quickjs.cfunc.Func,
@@ -390,6 +562,14 @@ const module_exports = [_]Export{
     .{ .name = "chown", .func = chown, .nargs = 3 },
     .{ .name = "utimes", .func = utimes, .nargs = 3 },
     .{ .name = "link", .func = link, .nargs = 2 },
+    .{ .name = "mkdtemp", .func = mkdtemp, .nargs = 1 },
+    .{ .name = "open", .func = open, .nargs = 3 },
+    .{ .name = "close", .func = close, .nargs = 1 },
+    .{ .name = "read", .func = read, .nargs = 3 },
+    .{ .name = "write", .func = writeFd, .nargs = 4 },
+    .{ .name = "fsync", .func = fsync, .nargs = 1 },
+    .{ .name = "fstat", .func = fstat, .nargs = 1 },
+    .{ .name = "ftruncate", .func = ftruncate, .nargs = 2 },
 };
 
 fn moduleInit(ctx: *quickjs.Context, def: *quickjs.ModuleDef) bool {

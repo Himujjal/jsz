@@ -28,6 +28,9 @@ pub const Runtime = struct {
     writer: ?*std.Io.Writer = null,
     env_owned: ?std.process.Environ.Map = null,
     entry_owned: ?[]u8 = null,
+    sigint_handle: ?zio.JoinHandle(void) = null,
+    shutdown_done: bool = false,
+    had_error: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, options: Options) !*Runtime {
         const self = try allocator.create(Runtime);
@@ -82,6 +85,7 @@ pub const Runtime = struct {
         errdefer self.host.deinitCwd();
         try builtins.register(&self.host);
         js_rt.setModuleLoaderFunc(Host, &self.host, module.normalize, module.load);
+        js_rt.setHostPromiseRejectionTracker(Host, &self.host, onPromiseRejection);
 
         // Bootstrap last: it imports the modules that need the host opaque set.
         const bootstrap = @embedFile("builtins/bootstrap.js");
@@ -96,6 +100,8 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Runtime) void {
+        self.stopSigintWatcher();
+        self.finish();
         self.flush() catch {};
         self.host.deinitCwd();
         self.fs.deinit(self.ctx);
@@ -133,6 +139,19 @@ pub const Runtime = struct {
         defer self.allocator.free(terminated);
         self.host.entry = null;
         return self.evalTerminated(terminated, filename, false);
+    }
+
+    /// Evaluates `source` as a module when it uses top-level import/export
+    /// syntax, matching Node's `--input-type=detect` for `-e`.
+    pub fn evalDetected(
+        self: *Runtime,
+        source: []const u8,
+        filename: [:0]const u8,
+    ) !quickjs.Value {
+        const terminated = try self.allocator.dupeSentinel(u8, source, 0);
+        defer self.allocator.free(terminated);
+        self.host.entry = null;
+        return self.evalTerminated(terminated, filename, quickjs.detectModule(source));
     }
 
     pub fn evalFile(self: *Runtime, path: []const u8) !quickjs.Value {
@@ -177,9 +196,8 @@ pub const Runtime = struct {
         if (!is_module) {
             const value = self.ctx.eval(source, filename, .{});
             if (value.isException()) {
-                self.reportException();
                 value.deinit(self.ctx);
-                return error.JavaScriptError;
+                return self.failEval();
             }
             return value;
         }
@@ -188,14 +206,14 @@ pub const Runtime = struct {
         // its `import.meta` before QuickJS instantiates and evaluates it.
         const compiled = self.ctx.eval(source, filename, .{ .type = .module, .compile_only = true });
         if (compiled.isException()) {
-            self.reportException();
             compiled.deinit(self.ctx);
-            return error.JavaScriptError;
+            return self.failEval();
         }
         const def = module.moduleDefFromValue(compiled) orelse {
             _ = self.ctx.throwInternalError("module compilation produced no module definition");
             self.reportException();
             compiled.deinit(self.ctx);
+            self.had_error = true;
             return error.ModuleInitFailed;
         };
         module.setImportMeta(&self.host, self.ctx, def, filename, true);
@@ -203,16 +221,60 @@ pub const Runtime = struct {
         // JS_EvalFunction takes ownership of the compiled value.
         const value = self.ctx.evalFunction(compiled);
         if (value.isException()) {
-            self.reportException();
             value.deinit(self.ctx);
-            return error.JavaScriptError;
+            return self.failEval();
         }
-        return value;
+        if (!value.isPromise()) return value;
+        if (value.promiseState(self.ctx) != .rejected) return value;
+
+        // Module evaluation reports a top-level throw by rejecting the
+        // returned promise instead of raising a context exception.
+        defer value.deinit(self.ctx);
+        const reason = value.promiseResult(self.ctx);
+        defer reason.deinit(self.ctx);
+        self.loop.discardRejectionsFor(reason);
+        if (self.loop.handleUncaughtValue(reason)) return .undefined;
+        self.had_error = true;
+        return error.JavaScriptError;
+    }
+
+    /// Routes an eval-time exception through `uncaughtException` when a
+    /// listener is installed; the script still stops, like Node.
+    fn failEval(self: *Runtime) !quickjs.Value {
+        if (self.loop.handleUncaught()) return .undefined;
+        self.had_error = true;
+        return error.JavaScriptError;
     }
 
     pub fn run(self: *Runtime) !void {
-        try self.loop.run();
+        if (self.loop.sigint_wanted and self.sigint_handle == null) {
+            self.sigint_handle = try self.zio_rt.spawn(waitForSigint, .{&self.loop});
+        }
+
+        const result = self.loop.run();
+        self.stopSigintWatcher();
+        if (result) |_| {} else |_| self.had_error = true;
+        self.finish();
         try self.flush();
+        return result;
+    }
+
+    fn stopSigintWatcher(self: *Runtime) void {
+        if (self.sigint_handle) |*handle| {
+            handle.cancel();
+            self.sigint_handle = null;
+        }
+    }
+
+    /// Shutdown ordering: exit hooks, then unhandled rejections, then the
+    /// caller flushes and deinits.
+    fn finish(self: *Runtime) void {
+        if (self.shutdown_done) return;
+        self.shutdown_done = true;
+
+        const code: u8 = if (self.had_error or self.loop.failed) 1 else self.loop.exit_code;
+        self.loop.runExitHooks(code);
+        self.loop.reportUnhandledRejections();
     }
 
     pub fn tick(self: *Runtime) !void {
@@ -251,3 +313,26 @@ pub const Runtime = struct {
         self.loop.reportException();
     }
 };
+
+/// Runs on a zio task; it only sets a flag and wakes the queue, never touches
+/// QuickJS.
+fn waitForSigint(loop: *EventLoop) void {
+    var signal = zio.Signal.init(.interrupt) catch return;
+    defer signal.deinit();
+
+    while (true) {
+        signal.wait() catch return;
+        loop.interrupt();
+    }
+}
+
+fn onPromiseRejection(
+    host_opt: ?*Host,
+    _: *quickjs.Context,
+    promise: quickjs.Value,
+    reason: quickjs.Value,
+    is_handled: bool,
+) void {
+    const host = host_opt orelse return;
+    host.loop.trackRejection(promise, reason, is_handled);
+}
