@@ -80,6 +80,12 @@ pub fn normalize(
     };
     const allocator = host.allocator;
 
+    // Only embedded builtins may reach private (`node:_*`) native modules.
+    if (std.mem.startsWith(u8, spec, "node:_") and findBuiltin(base) == null) {
+        fail(ctx, allocator, "Cannot import private module '{s}' from '{s}'", .{ spec, base });
+        return null;
+    }
+
     if (std.mem.startsWith(u8, spec, "node:") or isBare(spec)) {
         const canonical = if (std.mem.startsWith(u8, spec, "node:"))
             allocator.dupe(u8, spec) catch {
@@ -226,13 +232,51 @@ fn compile(
     defer value.deinit(ctx);
     if (value.isException()) return null;
 
-    const raw = quickjs.c.JS_VALUE_GET_PTR(value.cval());
-    const ptr = raw orelse {
+    const def = moduleDefFromValue(value) orelse {
         _ = ctx.throwInternalError("module compilation produced no module definition");
         return null;
     };
+    setImportMeta(host, ctx, def, name, isMain(host, name));
+    return def;
+}
 
-    return @ptrCast(@alignCast(ptr));
+/// Extracts the `JSModuleDef` pointer carried by a compiled module value.
+pub fn moduleDefFromValue(value: quickjs.Value) ?*quickjs.ModuleDef {
+    const raw = quickjs.c.JS_VALUE_GET_PTR(value.cval()) orelse return null;
+    return @ptrCast(@alignCast(raw));
+}
+
+fn isMain(host: *Host, name: []const u8) bool {
+    const entry = host.entry orelse return false;
+    return std.mem.eql(u8, name, entry);
+}
+
+/// Populates `import.meta` for a compiled module. Failures are non-fatal: a
+/// missing `import.meta` degrades behaviour, it does not break loading.
+pub fn setImportMeta(
+    host: *Host,
+    ctx: *quickjs.Context,
+    def: *quickjs.ModuleDef,
+    name: []const u8,
+    is_main: bool,
+) void {
+    const allocator = host.allocator;
+    const url = if (std.mem.startsWith(u8, name, "node:"))
+        allocator.dupe(u8, name) catch return
+    else
+        std.mem.concat(allocator, u8, &.{ "file://", name }) catch return;
+    defer allocator.free(url);
+
+    const meta = def.getImportMeta(ctx);
+    if (meta.isException()) {
+        meta.deinit(ctx);
+        return;
+    }
+    defer meta.deinit(ctx);
+
+    // setPropertyStr consumes both values, including on failure.
+    meta.setPropertyStr(ctx, "url", quickjs.Value.initStringLen(ctx, url)) catch {};
+    meta.setPropertyStr(ctx, "main", quickjs.Value.initBool(is_main)) catch {};
 }
 
 test "normalize maps bare specifiers to node: names" {
@@ -244,6 +288,7 @@ test "normalize maps bare specifiers to node: names" {
     var host: Host = undefined;
     host.allocator = std.testing.allocator;
     host.ctx = ctx;
+    host.entry = null;
 
     const name = normalize(&host, ctx, "", "path") orelse return error.NormalizeFailed;
     defer ctx.freeCString(name);
@@ -259,6 +304,7 @@ test "unknown builtin throws instead of resolving" {
     var host: Host = undefined;
     host.allocator = std.testing.allocator;
     host.ctx = ctx;
+    host.entry = null;
 
     const ok = std.testing.expect(normalize(&host, ctx, "", "node:not_a_builtin") == null);
     const exc = ctx.getException();
@@ -275,6 +321,7 @@ test "embedded path module exposes node-compatible exports" {
     var host: Host = undefined;
     host.allocator = std.testing.allocator;
     host.ctx = ctx;
+    host.entry = null;
 
     rt.setModuleLoaderFunc(Host, &host, normalize, load);
 

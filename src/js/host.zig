@@ -13,4 +13,6 @@ pub const Host = struct {
     /// Borrowed process arguments; owned by the caller that outlives the runtime.
     argv: []const []const u8,
     environ: *std.process.Environ.Map,
+    /// Canonical name of the entry module (absolute path) or null for evals.
+    entry: ?[]const u8 = null,
 };

@@ -11,4 +11,5 @@ test {
     _ = @import("fs_test.zig");
     _ = @import("process_test.zig");
     _ = @import("cli_test.zig");
+    _ = @import("module_test.zig");
 }

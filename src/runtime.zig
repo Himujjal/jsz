@@ -27,6 +27,7 @@ pub const Runtime = struct {
     out: std.ArrayList(u8) = .empty,
     writer: ?*std.Io.Writer = null,
     env_owned: ?std.process.Environ.Map = null,
+    entry_owned: ?[]u8 = null,
 
     pub fn init(allocator: std.mem.Allocator, options: Options) !*Runtime {
         const self = try allocator.create(Runtime);
@@ -100,6 +101,7 @@ pub const Runtime = struct {
         self.js_rt.deinit();
         self.zio_rt.deinit();
         if (self.env_owned) |*map| map.deinit();
+        if (self.entry_owned) |entry| self.allocator.free(entry);
         self.out.deinit(self.allocator);
         const allocator = self.allocator;
         allocator.destroy(self);
@@ -121,13 +123,21 @@ pub const Runtime = struct {
         // QuickJS requires input[input_len] to be a NUL byte.
         const terminated = try self.allocator.dupeSentinel(u8, source, 0);
         defer self.allocator.free(terminated);
+        self.host.entry = null;
         return self.evalTerminated(terminated, filename, false);
     }
 
     pub fn evalFile(self: *Runtime, path: []const u8) !quickjs.Value {
+        // The loader canonicalizes file modules to absolute paths, so the entry
+        // must use the same form for `import.meta.main` to match.
+        const entry = try std.fs.path.resolveAlloc(self.allocator, &.{path});
+        if (self.entry_owned) |previous| self.allocator.free(previous);
+        self.entry_owned = entry;
+        self.host.entry = self.entry_owned.?;
+
         const source = try std.Io.Dir.cwd().readFileAllocOptions(
             self.zio_rt.io(),
-            path,
+            entry,
             self.allocator,
             .limited(16 * 1024 * 1024),
             .of(u8),
@@ -135,10 +145,10 @@ pub const Runtime = struct {
         );
         defer self.allocator.free(source);
 
-        const filename = try self.allocator.dupeSentinel(u8, path, 0);
+        const filename = try self.allocator.dupeSentinel(u8, entry, 0);
         defer self.allocator.free(filename);
 
-        return self.evalTerminated(source, filename, isModulePath(path, source));
+        return self.evalTerminated(source, filename, isModulePath(entry, source));
     }
 
     /// `.mjs` is always a module, `.cjs` is always a script, and `.js` is
@@ -156,8 +166,34 @@ pub const Runtime = struct {
         filename: [:0]const u8,
         is_module: bool,
     ) !quickjs.Value {
-        const flags: quickjs.EvalFlags = if (is_module) .{ .type = .module } else .{};
-        const value = self.ctx.eval(source, filename, flags);
+        if (!is_module) {
+            const value = self.ctx.eval(source, filename, .{});
+            if (value.isException()) {
+                self.reportException();
+                value.deinit(self.ctx);
+                return error.JavaScriptError;
+            }
+            return value;
+        }
+
+        // The entry never passes through the loader, so compile it here to set
+        // its `import.meta` before QuickJS instantiates and evaluates it.
+        const compiled = self.ctx.eval(source, filename, .{ .type = .module, .compile_only = true });
+        if (compiled.isException()) {
+            self.reportException();
+            compiled.deinit(self.ctx);
+            return error.JavaScriptError;
+        }
+        const def = module.moduleDefFromValue(compiled) orelse {
+            _ = self.ctx.throwInternalError("module compilation produced no module definition");
+            self.reportException();
+            compiled.deinit(self.ctx);
+            return error.ModuleInitFailed;
+        };
+        module.setImportMeta(&self.host, self.ctx, def, filename, true);
+
+        // JS_EvalFunction takes ownership of the compiled value.
+        const value = self.ctx.evalFunction(compiled);
         if (value.isException()) {
             self.reportException();
             value.deinit(self.ctx);
