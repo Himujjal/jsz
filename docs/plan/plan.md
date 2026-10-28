@@ -1,7 +1,8 @@
 # jsz Node.js 90% compatibility plan
 
 Status: Phases 0, 1, 2, 3A, 3B implemented; see §15 Backlog
-Target runtime: Zig 0.17.0, QuickJS-ng (pinned in `build.zig.zon`), zio 0.19.0
+Target runtime: Zig 0.17.0, QuickJS-ng 0.17.0 (via `zig-quickjs-ng`, pinned
+in `build.zig.zon`), zio 0.19.0
 Target Node semantics: Node.js 22 LTS, POSIX first, Windows best-effort
 
 This document is a research and implementation plan. It changes no code. It
@@ -1814,8 +1815,17 @@ names the phase that should pick it up and a priority:
 | `structuredClone` | deferred | QuickJS lacks it; implement over JSON only for plain data, or keep deferred | P3 |
 | `console` extras | `log`/`error` only | Add `info`, `warn`, `debug`, `trace`, `dir`, `time`/`timeEnd` over the shared writer | P2 |
 | `import.meta.resolve` | not implemented | Needs a synchronous resolver; document as unsupported | P3 |
-| Dynamic `import()` from a timer callback | works in principle, not covered by a regression test | Add a Phase 0 regression fixture (the loader suspends the JS task) | P1 |
+| Dynamic `import()` | covered by `tests/fixtures/modules/dynamic.mjs`: entry, timer, microtask, `file:` URL, percent-encoded paths, directory index probing, cache identity, caught failures, and an uncaught rejection that exits 1 | Keep extending when new loader paths land | - |
+| Dynamic import of a throwing module | fixed by QuickJS-ng 0.17.0 (`js_promise_set_handled` for the internal module-evaluation promise) | Re-check on every engine bump | - |
+| Module resolution errors | `ERR_MODULE_NOT_FOUND`, `ERR_UNKNOWN_BUILTIN_MODULE`, `ERR_INVALID_MODULE_SPECIFIER`, `ERR_UNSUPPORTED_ESM_URL_SCHEME` with Node-shaped `code` | Add `url`/`path` fields only if a fixture needs them | - |
+| `file:` specifiers | POSIX absolute paths and `localhost` only; percent-decoded | Add Windows drive handling with the Windows work | P2 |
 | `-e` module detection | fixed during 3B (`Runtime.evalDetected`) | Add more CLI cases (`.cjs`, syntax errors) | P3 |
+
+Engine note: the dependency bump to QuickJS-ng 0.17.0 is required for caught
+dynamic imports of modules that throw. QuickJS-ng 0.11.0 rejected the internal
+module-evaluation promise without marking it handled, so a caught `import()`
+still surfaced as an unhandled rejection. Re-validate §14's engine gap list
+against 0.17.0 on the next engine bump.
 
 ### 15.5 Deferred last 10% (unchanged)
 
