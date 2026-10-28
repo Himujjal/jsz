@@ -2,9 +2,13 @@
     .name = .jsz,
     .version = "0.0.1",
     .dependencies = .{
+        // `upgrade/quickjsng-v0.17.0`: bundles QuickJS-ng 0.17.0, which marks
+        // the internal module-evaluation promise handled after a top-level
+        // throw. Without it, caught dynamic imports still report an unhandled
+        // rejection.
         .quickjs = .{
-            .url = "git+https://github.com/Inqnuam/zig-quickjs-ng#6e8f3e05cd04b5a27c20012c11fb3c674c09731d",
-            .hash = "quickjs_ng-0.0.0-0cZnA5HJAwDzPScSVrzK5cwiphOAXt89TH5T9ljJY8xl",
+            .url = "git+https://github.com/Inqnuam/zig-quickjs-ng#03e8a80e12ec0cfab2dff0e93c3594529c6b9911",
+            .hash = "quickjs_ng-0.0.0-0cZnAw7TAwDJmVc37Q1FcLQhxKsv2ZM4Ha4mvIObzsmE",
         },
         .zio = .{
             .url = "git+https://github.com/lalinsky/zio#9b49086c72edbfbcef00acb557d6177bcaee1cb5",
