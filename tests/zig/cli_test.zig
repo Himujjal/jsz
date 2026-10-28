@@ -55,6 +55,20 @@ test "cli eval auto-detects module syntax" {
     try std.testing.expectEqualStrings("a/b\nnumber\n", result.stdout);
 }
 
+test "cli eval supports dynamic import relative to cwd" {
+    const allocator = std.testing.allocator;
+    const result = try run(allocator, &.{
+        exe,
+        "-e",
+        "import('./tests/fixtures/modules/dynamic-dep.mjs').then((m) => console.log('eval=' + m.value));",
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    try expectExit(result, 0);
+    try std.testing.expectEqualStrings("eval=42\n", result.stdout);
+}
+
 test "cli propagates the process.exit code after flushing stdout" {
     const allocator = std.testing.allocator;
     const script = try std.fs.path.resolveAlloc(allocator, &.{"tests/fixtures/process/exit-code.js"});

@@ -43,7 +43,8 @@ pub fn findBuiltin(name: []const u8) ?Builtin {
 }
 
 fn isBare(spec: []const u8) bool {
-    return !std.mem.startsWith(u8, spec, "./") and
+    return findScheme(spec) == null and
+        !std.mem.startsWith(u8, spec, "./") and
         !std.mem.startsWith(u8, spec, "../") and
         !std.mem.startsWith(u8, spec, "/") and
         !std.mem.startsWith(u8, spec, "file:") and
@@ -54,9 +55,27 @@ fn throwOom(ctx: *quickjs.Context) void {
     _ = ctx.throwOutOfMemory();
 }
 
+/// Node-compatible error codes for module resolution failures.
+pub const ErrorCode = enum {
+    module_not_found,
+    unknown_builtin,
+    invalid_specifier,
+    unsupported_scheme,
+
+    pub fn text(self: ErrorCode) []const u8 {
+        return switch (self) {
+            .module_not_found => "ERR_MODULE_NOT_FOUND",
+            .unknown_builtin => "ERR_UNKNOWN_BUILTIN_MODULE",
+            .invalid_specifier => "ERR_INVALID_MODULE_SPECIFIER",
+            .unsupported_scheme => "ERR_UNSUPPORTED_ESM_URL_SCHEME",
+        };
+    }
+};
+
 fn fail(
     ctx: *quickjs.Context,
     allocator: std.mem.Allocator,
+    code: ErrorCode,
     comptime fmt: []const u8,
     args: anytype,
 ) void {
@@ -65,7 +84,19 @@ fn fail(
         return;
     };
     defer allocator.free(msg);
-    const exc = ctx.throwTypeError(msg);
+
+    // Dynamic `import()` surfaces this object as the rejection reason, so it
+    // must be a plain Error with a Node `code` rather than a TypeError.
+    const err = quickjs.Value.initError(ctx);
+    if (err.isException()) {
+        err.deinit(ctx);
+        throwOom(ctx);
+        return;
+    }
+    err.setPropertyStr(ctx, "code", quickjs.Value.initStringLen(ctx, code.text())) catch {};
+    err.setPropertyStr(ctx, "message", quickjs.Value.initStringLen(ctx, msg)) catch {};
+
+    const exc = err.throw(ctx);
     exc.deinit(ctx);
 }
 
@@ -94,39 +125,86 @@ pub fn normalize(
 
     // Only embedded builtins may reach private (`node:_*`) native modules.
     if (std.mem.startsWith(u8, spec, "node:_") and findBuiltin(base) == null) {
-        fail(ctx, allocator, "Cannot import private module '{s}' from '{s}'", .{ spec, base });
+        fail(ctx, allocator, .unknown_builtin, "Cannot import private module '{s}' from '{s}'", .{ spec, base });
         return null;
     }
 
-    if (std.mem.startsWith(u8, spec, "node:") or isBare(spec)) {
-        const canonical = if (std.mem.startsWith(u8, spec, "node:"))
-            allocator.dupe(u8, spec) catch {
-                throwOom(ctx);
-                return null;
-            }
-        else
-            std.fmt.allocPrint(allocator, "node:{s}", .{spec}) catch {
-                throwOom(ctx);
-                return null;
-            };
+    if (std.mem.startsWith(u8, spec, "node:")) {
+        if (findBuiltin(spec) == null) {
+            fail(ctx, allocator, .unknown_builtin, "No such built-in module: {s}", .{spec});
+            return null;
+        }
+        return toJsCString(ctx, spec);
+    }
+
+    if (isBare(spec)) {
+        const canonical = std.fmt.allocPrint(allocator, "node:{s}", .{spec}) catch {
+            throwOom(ctx);
+            return null;
+        };
         defer allocator.free(canonical);
 
         if (findBuiltin(canonical) == null) {
-            fail(ctx, allocator, "Cannot find module '{s}' imported from {s}", .{ spec, base });
+            fail(
+                ctx,
+                allocator,
+                .module_not_found,
+                "Cannot find package '{s}' imported from {s}; npm package resolution is not supported",
+                .{ spec, base },
+            );
             return null;
         }
         return toJsCString(ctx, canonical);
     }
 
     if (std.mem.startsWith(u8, base, "node:")) {
-        fail(ctx, allocator, "Cannot resolve '{s}' from builtin '{s}'", .{ spec, base });
+        fail(ctx, allocator, .invalid_specifier, "Cannot resolve '{s}' from builtin '{s}'", .{ spec, base });
         return null;
     }
 
-    const spec_res: ?[]u8 = resolveSpecifier(host, base, spec) catch |err| switch (err) {
+    // `file:` is a path, not a remote URL. Other schemes are outside the
+    // supported module graph and must fail with Node's scheme error.
+    const path_or_spec: []const u8 = if (std.mem.startsWith(u8, spec, "file:")) {
+        const path = fileUrlToPath(allocator, spec) catch |err| {
+            fail(
+                ctx,
+                allocator,
+                .invalid_specifier,
+                "Invalid file URL '{s}' imported from {s}: {s}",
+                .{ spec, base, @errorName(err) },
+            );
+            return null;
+        };
+        defer allocator.free(path);
+        const resolved = resolveSpecifier(host, base, path) catch |err| switch (err) {
+            error.FileNotFound => {
+                fail(ctx, allocator, .module_not_found, "Cannot find module '{s}' imported from {s}", .{ spec, base });
+                return null;
+            },
+            else => {
+                fail(ctx, allocator, .module_not_found, "Cannot resolve '{s}': {s}", .{ spec, @errorName(err) });
+                return null;
+            },
+        };
+        defer allocator.free(resolved);
+        return toJsCString(ctx, resolved);
+    } else spec;
+
+    if (findScheme(path_or_spec)) |scheme| {
+        fail(
+            ctx,
+            allocator,
+            .unsupported_scheme,
+            "Unsupported URL scheme '{s}' in '{s}' imported from {s}",
+            .{ scheme, spec, base },
+        );
+        return null;
+    }
+
+    const spec_res: ?[]u8 = resolveSpecifier(host, base, path_or_spec) catch |err| switch (err) {
         error.FileNotFound => null,
         else => {
-            fail(ctx, allocator, "Cannot resolve '{s}': {s}", .{ spec, @errorName(err) });
+            fail(ctx, allocator, .module_not_found, "Cannot resolve '{s}': {s}", .{ spec, @errorName(err) });
             return null;
         },
     };
@@ -134,8 +212,53 @@ pub fn normalize(
         defer allocator.free(resolved);
         return toJsCString(ctx, resolved);
     }
-    fail(ctx, allocator, "Cannot find module '{s}' imported from {s}", .{ spec, base });
+    fail(ctx, allocator, .module_not_found, "Cannot find module '{s}' imported from {s}", .{ spec, base });
     return null;
+}
+
+/// Returns the scheme for a URL-like specifier, ignoring Windows drive
+/// letters and specifiers with a path separator before the colon.
+fn findScheme(spec: []const u8) ?[]const u8 {
+    const colon = std.mem.indexOfScalar(u8, spec, ':') orelse return null;
+    if (colon == 0) return null;
+    if (std.mem.indexOfAny(u8, spec[0..colon], "/\\") != null) return null;
+    if (colon == 1 and std.ascii.isAlphabetic(spec[0])) return null;
+    return spec[0..colon];
+}
+
+/// Converts a `file:` URL into a filesystem path. Only POSIX-style absolute
+/// paths and `localhost` hosts are accepted in v1.
+fn fileUrlToPath(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
+    var rest = url["file:".len..];
+    if (std.mem.startsWith(u8, rest, "//")) {
+        rest = rest[2..];
+        const slash = std.mem.indexOfScalar(u8, rest, '/') orelse return error.InvalidFileUrl;
+        const host = rest[0..slash];
+        if (host.len != 0 and !std.mem.eql(u8, host, "localhost")) return error.InvalidFileUrl;
+        rest = rest[slash..];
+    }
+    if (rest.len == 0 or rest[0] != '/') return error.InvalidFileUrl;
+    return percentDecode(allocator, rest);
+}
+
+fn percentDecode(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    var index: usize = 0;
+    while (index < input.len) {
+        if (input[index] != '%') {
+            try out.append(allocator, input[index]);
+            index += 1;
+            continue;
+        }
+        if (index + 2 >= input.len) return error.InvalidFileUrl;
+        const hi = std.fmt.charToDigit(input[index + 1], 16) catch return error.InvalidFileUrl;
+        const lo = std.fmt.charToDigit(input[index + 2], 16) catch return error.InvalidFileUrl;
+        try out.append(allocator, (hi << 4) | lo);
+        index += 3;
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 fn resolveSpecifier(host: *Host, base: []const u8, spec: []const u8) ![]u8 {
@@ -173,8 +296,10 @@ fn resolveSpecifier(host: *Host, base: []const u8, spec: []const u8) ![]u8 {
 }
 
 fn exists(io: std.Io, path: []const u8) bool {
-    std.Io.Dir.cwd().access(io, path, .{ .read = true }) catch return false;
-    return true;
+    // A directory at the exact probe path must fall through to the
+    // `<path>/index.js` probes instead of being treated as a module.
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = true }) catch return false;
+    return stat.kind == .file;
 }
 
 pub fn load(host_opt: ?*Host, ctx: *quickjs.Context, name: [:0]const u8) ?*quickjs.ModuleDef {
@@ -188,7 +313,7 @@ pub fn load(host_opt: ?*Host, ctx: *quickjs.Context, name: [:0]const u8) ?*quick
         return compile(host, ctx, builtin.source, builtin.name);
     }
     if (std.mem.startsWith(u8, name, "node:")) {
-        fail(ctx, host.allocator, "Cannot find module '{s}'", .{name});
+        fail(ctx, host.allocator, .unknown_builtin, "No such built-in module: {s}", .{name});
         return null;
     }
     return loadFile(host, ctx, name);
@@ -225,7 +350,7 @@ fn loadFile(host: *Host, ctx: *quickjs.Context, name: []const u8) ?*quickjs.Modu
         .of(u8),
         0,
     ) catch |err| {
-        fail(ctx, allocator, "Cannot read module '{s}': {s}", .{ name, @errorName(err) });
+        fail(ctx, allocator, .module_not_found, "Cannot read module '{s}': {s}", .{ name, @errorName(err) });
         return null;
     };
     defer allocator.free(source);

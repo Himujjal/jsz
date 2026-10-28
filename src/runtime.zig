@@ -156,8 +156,15 @@ pub const Runtime = struct {
 
     pub fn evalFile(self: *Runtime, path: []const u8) !quickjs.Value {
         // The loader canonicalizes file modules to absolute paths, so the entry
-        // must use the same form for `import.meta.main` to match.
-        const entry = try std.fs.path.resolveAlloc(self.allocator, &.{path});
+        // must use the same form for `import.meta.main` and `import.meta.url`
+        // to match. `resolveAlloc` alone does not prepend the cwd.
+        const entry = if (std.fs.path.isAbsolute(path))
+            try std.fs.path.resolveAlloc(self.allocator, &.{path})
+        else blk: {
+            const cwd = try std.process.currentPathAlloc(self.zio_rt.io(), self.allocator);
+            defer self.allocator.free(cwd);
+            break :blk try std.fs.path.resolveAlloc(self.allocator, &.{ cwd, path });
+        };
         if (self.entry_owned) |previous| self.allocator.free(previous);
         self.entry_owned = entry;
         self.host.entry = self.entry_owned.?;

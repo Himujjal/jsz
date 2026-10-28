@@ -2,6 +2,7 @@
 import { depMeta } from './meta-dep.mjs';
 
 console.log(`url-scheme=${import.meta.url.startsWith('file://')}`);
+console.log(`url-absolute=${import.meta.url.startsWith('file:///')}`);
 console.log(`url-suffix=${import.meta.url.endsWith('/modules/meta.mjs')}`);
 console.log(`main=${import.meta.main}`);
 console.log(`dep-main=${depMeta.main}`);
