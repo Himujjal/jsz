@@ -288,6 +288,9 @@ pub const EventLoop = struct {
                 self.failed = true;
                 return err;
             };
+            // `process.exit` may have run from a callback above; do not park on
+            // a live handle after the loop was asked to stop.
+            if (self.stopped) break;
 
             const deadline = self.nextDeadline();
             const queue_pending = if (self.queue) |queue| queue.hasWork() else false;
@@ -322,6 +325,7 @@ pub const EventLoop = struct {
                 self.failed = true;
                 return err;
             };
+            if (self.stopped) break;
 
             if (self.nextDeadline()) |next| {
                 if (next <= now()) {

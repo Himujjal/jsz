@@ -1,6 +1,10 @@
 const std = @import("std");
 
-pub const std_options: std.Options = .{ .log_level = .info };
+pub const std_options: std.Options = .{
+    .log_level = .info,
+    // Dusty logs every listener at info; Node's `http` is quiet.
+    .log_scope_levels = &.{.{ .scope = .dusty, .level = .warn }},
+};
 
 test {
     _ = @import("runtime_test.zig");
@@ -21,4 +25,8 @@ test {
     _ = @import("util_test.zig");
     _ = @import("events_test.zig");
     _ = @import("child_process_test.zig");
+    _ = @import("net_test.zig");
+    _ = @import("http_test.zig");
+    _ = @import("fetch_test.zig");
+    _ = @import("pkcs12_test.zig");
 }

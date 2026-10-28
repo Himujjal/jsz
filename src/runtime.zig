@@ -4,6 +4,9 @@ const zio = @import("zio");
 const EventLoop = @import("event_loop.zig").EventLoop;
 const Fs = @import("fs.zig").Fs;
 const ChildProcesses = @import("child_process.zig").ChildProcesses;
+const Net = @import("net.zig").Net;
+const Http = @import("http.zig").Http;
+const Fetch = @import("fetch.zig").Fetch;
 const jobs = @import("jobs.zig");
 const Host = @import("js/host.zig").Host;
 const builtins = @import("js/builtins.zig");
@@ -29,6 +32,9 @@ pub const Runtime = struct {
     queue: jobs.Queue = undefined,
     fs: Fs = undefined,
     children: ChildProcesses = undefined,
+    net: Net = undefined,
+    http: Http = undefined,
+    fetch: Fetch = undefined,
     host: Host = undefined,
     out: std.ArrayList(u8) = .empty,
     writer: ?*std.Io.Writer = null,
@@ -75,6 +81,9 @@ pub const Runtime = struct {
 
         self.fs = Fs.init(allocator, zio_rt, &self.queue);
         self.children = ChildProcesses.init(allocator, zio_rt, &self.queue);
+        self.net = Net.init(allocator, zio_rt, &self.queue);
+        self.http = Http.init(allocator, zio_rt, &self.queue);
+        self.fetch = Fetch.init(allocator, zio_rt, &self.queue);
         self.loop.queue = &self.queue;
 
         self.env_owned = if (options.environ_map == null) std.process.Environ.Map.init(allocator) else null;
@@ -89,6 +98,9 @@ pub const Runtime = struct {
             .fs = &self.fs,
             .rt = zio_rt,
             .children = &self.children,
+            .net = &self.net,
+            .http = &self.http,
+            .fetch = &self.fetch,
             .argv = options.argv orelse &.{},
             .environ = options.environ_map orelse &self.env_owned.?,
         };
@@ -118,6 +130,10 @@ pub const Runtime = struct {
         self.host.deinitCwd();
         // Live children must be reaped while QuickJS and the queue still exist.
         self.children.deinit(self.ctx);
+        // Network handles must stop before the queue closes.
+        self.fetch.deinit(self.ctx);
+        self.http.deinit(self.ctx);
+        self.net.deinit(self.ctx);
         // QuickJS must still be alive for abort callbacks.
         self.queue.shutdown(self.ctx);
         self.queue.deinit();

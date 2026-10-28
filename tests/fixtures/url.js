@@ -1,7 +1,7 @@
 // Exercises node:url with no timers and no filesystem access so the output is
 // deterministic. `tests/zig/url_test.zig` asserts the exact strings.
 
-import url, { URL, URLSearchParams, pathToFileURL, fileURLToPath } from 'node:url';
+import url, { URL, URLSearchParams, pathToFileURL, fileURLToPath, urlToHttpOptions } from 'node:url';
 import process from 'node:process';
 
 const lines = [];
@@ -97,7 +97,17 @@ try {
   add('file-null', error.code);
 }
 
-add('default-export', [typeof url.URL, typeof url.URLSearchParams, typeof url.pathToFileURL, typeof url.fileURLToPath].join(','));
+const httpOptions = urlToHttpOptions(new URL('https://user:pa%40ss@a:8443/x?y#z'));
+add('http-options', [
+  httpOptions.protocol,
+  httpOptions.hostname,
+  httpOptions.port,
+  httpOptions.path,
+  httpOptions.auth,
+  httpOptions.href,
+].join('|'));
+
+add('default-export', [typeof url.URL, typeof url.URLSearchParams, typeof url.pathToFileURL, typeof url.fileURLToPath, typeof url.urlToHttpOptions].join(','));
 add('string', String(parsed) === parsed.href);
 add('json', JSON.stringify(parsed));
 

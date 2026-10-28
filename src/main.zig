@@ -1,7 +1,11 @@
 const std = @import("std");
 const cli = @import("cli/cli.zig");
 
-pub const std_options: std.Options = .{ .log_level = .info };
+pub const std_options: std.Options = .{
+    .log_level = .info,
+    // Dusty logs every listener at info; Node's `http` is quiet.
+    .log_scope_levels = &.{.{ .scope = .dusty, .level = .warn }},
+};
 
 pub fn main(init: std.process.Init) !void {
     const code = cli.run(init) catch |err| {

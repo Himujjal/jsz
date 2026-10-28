@@ -5,6 +5,12 @@ import { TextEncoder, TextDecoder } from 'node:util';
 import { webcrypto } from 'node:crypto';
 import { URL, URLSearchParams } from 'node:url';
 import EventEmitter from 'node:events';
+import { fetch, Headers, Response, Request } from 'node:http';
+
+globalThis.fetch = fetch;
+globalThis.Headers = Headers;
+globalThis.Response = Response;
+globalThis.Request = Request;
 
 globalThis.process = process;
 globalThis.Buffer = Buffer;

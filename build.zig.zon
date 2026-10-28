@@ -14,6 +14,13 @@
             .url = "git+https://github.com/lalinsky/zio#9b49086c72edbfbcef00acb557d6177bcaee1cb5",
             .hash = "zio-0.19.0-xHbVVHNqLQCbtzv2oAZp_8CRYKcc76Om5t697j-vFskK",
         },
+        // Vendored from lalinsky/dusty v0.5.0 (48196c2d) with two local
+        // patches: the response status line can carry a numeric code and a
+        // caller-supplied reason phrase, and the client parser accepts codes
+        // its Status enum does not name.
+        .dusty = .{
+            .path = "vendor/dusty",
+        },
     },
     .minimum_zig_version = "0.17.0",
     .paths = .{""},

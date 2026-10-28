@@ -1336,6 +1336,33 @@ function fileURLToPath(url) {
   return percentDecode(pathname);
 }
 
-export { URL, URLSearchParams, pathToFileURL, fileURLToPath };
+function urlToHttpOptions(url) {
+  if (typeof url === 'string') url = new URL(url);
+  if (url === null || typeof url !== 'object' || typeof url.href !== 'string') {
+    throw invalidArgType('url', 'URL', url);
+  }
 
-export default { URL, URLSearchParams, pathToFileURL, fileURLToPath };
+  const hostname = url.hostname.startsWith('[') && url.hostname.endsWith(']')
+    ? url.hostname.slice(1, -1)
+    : url.hostname;
+  const options = {
+    protocol: url.protocol,
+    hostname,
+    hash: url.hash,
+    search: url.search,
+    pathname: url.pathname,
+    path: `${url.pathname || ''}${url.search || ''}`,
+    href: url.href,
+  };
+  if (url.port !== '') options.port = Number(url.port);
+  if (url.username !== '' || url.password !== '') {
+    const user = decodeURIComponent(url.username);
+    const password = decodeURIComponent(url.password);
+    options.auth = password === '' ? user : `${user}:${password}`;
+  }
+  return options;
+}
+
+export { URL, URLSearchParams, pathToFileURL, fileURLToPath, urlToHttpOptions };
+
+export default { URL, URLSearchParams, pathToFileURL, fileURLToPath, urlToHttpOptions };

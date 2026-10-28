@@ -1,48 +1,98 @@
 # Roadmap
 
-This page records the v0.1 scope, the limits that come with it, and possible directions. The next steps are ideas, not commitments, and the order is approximate.
+This page records what ships today, the intentional exclusions, and the next
+steps. The next steps are ideas, not commitments, and the order is approximate.
 
-## v0.1 shipped
+## Shipped
 
-- [x] `console.log` and `console.error` with JavaScript `toString` formatting and space-separated arguments
-- [x] `setTimeout(callback, delayMs, ...args)` and `clearTimeout(id)`
-- [x] `setInterval(callback, delayMs, ...args)` and `clearInterval(id)`
-- [x] `sleep(ms)` as a host function returning a native QuickJS Promise
-- [x] Native QuickJS Promises: `then`, `catch`, `finally`, `Promise.all`, `async`, and `await`
-- [x] CLI script execution, `-e` / `--eval`, `-h` / `--help`, and `-v` / `--version`
-- [x] Interactive REPL started by `repl` or by running with no arguments, with `.exit` and EOF handling
-- [x] Event loop with timer ordering, interval re-arming, cancellation, `max_iterations`, and `max_runtime_ms`
-- [x] Zig integration tests and JavaScript fixtures
-- [x] mise tasks, hk pre-commit checks, and a Forgejo Actions CI and release workflow
+- [x] `console`, timers, `sleep(ms)`, and native QuickJS Promises
+- [x] ESM `import`/`export`, `node:` and bare builtin specifiers, `import.meta`,
+      dynamic `import()`, and extension/index probing
+- [x] Async `fs` and `fs/promises`: read/write/append, copy/cp, rename, rm,
+      mkdir/mkdtemp, readdir, stat/lstat/fstat, access, realpath, links,
+      chmod/chown/utimes, and descriptor APIs (`open`/`read`/`write`/`close`/
+      `fsync`/`ftruncate`, `FileHandle`)
+- [x] `process`, `os`, `crypto`, `path` (posix + win32), `url`, `util`, `events`,
+      `Buffer`, `TextEncoder`/`TextDecoder`, `atob`/`btoa`
+- [x] `child_process` sync and async `spawn`/`exec`/`execFile`, output streams,
+      stdin, signals, `timeout`, and `AbortSignal`
+- [x] TCP `node:net` servers and clients
+- [x] `http.createServer` over vendored dusty 0.5.0: `res.write` and
+      `flushHeaders` send real chunks, `end` terminates or sends a single
+      buffered body, a 64 KiB high-water queue drives `drain`, `destroy`
+      aborts, headers are immutable after send, and `statusMessage` plus
+      arbitrary 100-999 status codes reach the wire. `server.close()` drains
+      in-flight responses.
+- [x] `http.request`/`http.get` and `https.request`/`https.get` with response
+      bodies streamed through `IncomingMessage` `data`/`end`/`close` and
+      ack-based pause/resume backpressure
+- [x] `https.request`/`https.get` TLS options: `ca`, `cert`+`key`,
+      `pfx`+`passphrase`, and `rejectUnauthorized`; each distinct TLS
+      configuration gets its own cached client and connection pool
+- [x] `https.createServer` over dusty's TLS listener with PEM `cert`/`key`,
+      `pfx`+`passphrase`, `ca`, `requestCert`, and `rejectUnauthorized` (mTLS)
+- [x] Global `fetch`/`Headers`/`Response`/`Request` over vendored dusty 0.5.0
+      with redirects, final URLs, `redirect: 'error' | 'manual'`, decompression,
+      HTTPS, and in-flight `AbortSignal` cancellation
+- [x] Zig integration tests, JavaScript fixtures, mise tasks, hk pre-commit
+      checks, and Forgejo Actions CI
 
-## Non-goals for v0.1
+## Deferred (the last 10%)
 
-These are intentional exclusions, not missing pieces:
-
-- ES modules and `import`
-- Filesystem access
-- Network access
-- Child processes
-- npm packages
-- Node.js API compatibility
-- TypeScript
-- Top-level `await` outside async functions
+- Full Node streams (`Readable`/`Writable`, web streams)
+- Streaming `fetch` response bodies (`res.text()`/`json()` stay buffered)
+- HTTP request-body streaming (server bodies are capped at 1 MiB), trailers,
+  and interim 1xx responses
+- `dns`, `tls`, `zlib`, `worker_threads`, `readline`, `assert`
+- `fs.watch`, `fs.createReadStream`/`createWriteStream`, `fs` `*Sync`
+- UDP (`node:dgram`)
+- `child_process.fork` and Node-compatible IPC
+- `webcrypto.subtle`, ciphers, key generation, signing
 
 ## Known limitations
 
-- No module system. Scripts are evaluated as a single source unit, so `import` and `export` are unavailable.
-- No unhandled rejection reporting. A rejected promise without a handler is not reported by the runtime.
+- JavaScript is single-threaded. QuickJS is touched only on the JS task; zio
+  tasks carry file, child, network, and fetch work.
+- `fs` is async-only. `*Sync` names throw `ERR_METHOD_NOT_IMPLEMENTED`, and
+  `existsSync` is not exported.
+- HTTP request bodies are buffered whole (1 MiB cap), so handlers cannot read
+  `req` incrementally. Response bodies stream. `fetch` responses are buffered
+  and capped at 10 MiB.
+- `IncomingMessage` is not a full `Readable`: it emits `data`/`end`/`close`,
+  supports `setEncoding`, `pause`, `resume`, and `destroy`, but not `read`,
+  `pipe`, `unshift`, or async iteration. Reads are 16 KiB, so bodies under
+  16 KiB arrive as a single `data` event. `res.complete` is false until EOF.
+- `http.request`/`http.get`/`https.request`/`https.get` do not follow
+  redirects. `socket.encrypted` is not set, so callers cannot detect TLS from
+  the socket.
+- `https` accepts `servername` but ignores it; dusty derives the SNI name from
+  the URL. There is no per-request SNI override.
+- `https.createServer` accepts PEM `cert`/`key`, `pfx`+`passphrase`, `ca`,
+  `requestCert`, and `rejectUnauthorized`. PFX parsing is pure Zig (PBES2/AES
+  and legacy SHA1+3DES/RC2 PBE); MAC verification, RC4 PFX, and non-AES PBES2
+  schemes are rejected.
+- The status line and response parser come from vendored dusty
+  (`vendor/dusty`) with a small patch: servers can emit a numeric status code
+  with a caller-supplied reason phrase, and the client parser accepts codes its
+  `Status` enum does not name. `fetch` reason phrases still come from dusty's
+  parser, so HTTP/2 responses do not carry the wire reason phrase.
+- `server.close()` stops accepting, lets in-flight handlers finish, and closes
+  idle keep-alive connections through dusty's drain.
+- `fetch` supports in-flight `AbortSignal` cancellation; an already-aborted
+  signal rejects before the request starts.
 - Timer delays are clamped to 2,147,483,647 ms.
-- JavaScript is single-threaded. All QuickJS calls run on the main zio task, and there are no worker threads.
-- No source maps. Stack traces refer to the evaluated source without a mapping layer.
+- No source maps. Stack traces refer to the evaluated source without a mapping
+  layer.
 
 ## Possible next steps
 
-These are ideas, not commitments.
-
-1. **ES modules.** Add module loading, path resolution, and `import` / `export` support. This would require a loader and a decision about how modules interact with the single-source evaluation model.
-2. **Filesystem API.** Expose file reads and writes, likely as asynchronous operations driven by zio. This would also require deciding which paths scripts may access.
-3. **Unhandled rejection reporting.** Track rejected promises that never receive a handler and report them with a stack trace. This would also require deciding whether an unhandled rejection should stop the process or only print a warning.
-4. **Richer console formatting.** Improve value inspection for objects and arrays, and consider format specifiers or separate stderr routing for `console.error`.
-5. **HTTP and networking.** Add TCP and HTTP client or server APIs backed by zio. This would be a substantial expansion of the runtime surface.
-6. **Worker threads.** Run JavaScript on multiple threads with message passing. This conflicts with the current single-threaded design and would require one QuickJS context per worker plus a careful ownership model.
+1. **Streams.** Implement `Readable`/`Writable` and move HTTP request/response
+   bodies, `net.Socket`, and child-process stdio onto them.
+2. **Fetch streaming.** Expose the response body as a stream and stream request
+   bodies instead of buffering them.
+3. **HTTP request streaming.** Read server request bodies incrementally, add
+   trailers and interim 1xx responses, and set `socket.encrypted`.
+4. **Phase 6 fidelity.** Fill in `errno` tables, Stats/Dirent edge cases,
+   differential tests against Node, and the compatibility matrix.
+5. **Worker threads.** Run JavaScript on multiple threads with one QuickJS
+   context per worker and message passing.

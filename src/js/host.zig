@@ -4,6 +4,9 @@ const zio = @import("zio");
 const EventLoop = @import("../event_loop.zig").EventLoop;
 const Fs = @import("../fs.zig").Fs;
 const ChildProcesses = @import("../child_process.zig").ChildProcesses;
+const Net = @import("../net.zig").Net;
+const Http = @import("../http.zig").Http;
+const Fetch = @import("../fetch.zig").Fetch;
 
 pub const Host = struct {
     allocator: std.mem.Allocator,
@@ -14,6 +17,9 @@ pub const Host = struct {
     fs: *Fs,
     rt: *zio.Runtime,
     children: *ChildProcesses,
+    net: *Net,
+    http: *Http,
+    fetch: *Fetch,
     /// Borrowed process arguments; owned by the caller that outlives the runtime.
     argv: []const []const u8,
     environ: *std.process.Environ.Map,

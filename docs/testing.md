@@ -4,28 +4,41 @@
 
 jsz has two test layers:
 
-1. Zig integration tests in `tests/zig`. They import the `jsz` module, create a runtime, evaluate JavaScript, and inspect results and output.
-2. JavaScript fixtures in `tests/fixtures`. The Zig harness runs each fixture with `evalFile`, lets the event loop finish, and compares `globalThis.__result`.
+1. Zig integration tests in `tests/zig`. They import the `jsz` module, create a
+   runtime, evaluate JavaScript, and inspect values, captured stdout, and exit
+   codes.
+2. JavaScript fixtures in `tests/fixtures`. The Zig harness runs each fixture
+   through a real runtime (or the installed CLI), and compares
+   `globalThis.__result`, captured stdout, or the exit code.
 
-Both layers use `std.testing.allocator`, so memory leaks fail the suite.
+Both layers use `std.testing.allocator`, so memory leaks fail the suite. Network
+fixtures bind ephemeral ports, clean up their servers, and use a watchdog timer
+that prints `timeout` and exits non-zero when an operation hangs.
 
 ## File map
 
 | Path | Purpose |
 | --- | --- |
-| `tests/zig/main.zig` | Test root; imports `runtime_test.zig`, `timers_test.zig`, `promises_test.zig`, and `fixtures_test.zig`. |
-| `tests/zig/helpers.zig` | Runtime setup with guards, allocating writer capture, result reading, and fixture execution. |
+| `tests/zig/main.zig` | Test root; imports every test file below. |
+| `tests/zig/helpers.zig` | Runtime setup, stdout capture, fixture execution, argv/env, and process results. |
 | `tests/zig/runtime_test.zig` | Evaluation, syntax errors, promise jobs, invalid timer callbacks, and the version export. |
-| `tests/zig/timers_test.zig` | Microtask and timer ordering, callback arguments, `clearTimeout`, `clearInterval`, and the iteration guard. |
+| `tests/zig/timers_test.zig` | Microtask/timer ordering, callback arguments, `clearTimeout`, `clearInterval`, and the iteration guard. |
 | `tests/zig/promises_test.zig` | `Promise.all`, `sleep`, chained sleeps, and promise-timer cancellation. |
-| `tests/zig/fixtures_test.zig` | All seven JavaScript fixtures; `errors.js` checks uncaught timer errors. |
-| `tests/fixtures/timers.js` | Timeout ordering, callback arguments, and microtask ordering. |
-| `tests/fixtures/intervals.js` | Repeating interval that clears itself after three ticks. |
-| `tests/fixtures/promises.js` | `Promise.all` over resolved values. |
-| `tests/fixtures/async_await.js` | `async` function awaiting `sleep`. |
-| `tests/fixtures/sleep_promise.js` | `new Promise((resolve) => setTimeout(resolve, ms))` awaited twice. |
-| `tests/fixtures/long_timer.js` | A 2200 ms timeout, above the i32 nanosecond range, must not fire early. |
-| `tests/fixtures/errors.js` | Throws inside a timer to exercise uncaught exception handling. |
+| `tests/zig/module_test.zig` | Builtin resolution, embedded modules, relative imports, cycles, and `import.meta`. |
+| `tests/zig/fs_test.zig` | Async filesystem paths, descriptors, errors, and sync guards. |
+| `tests/zig/process_test.zig` | `process.argv`, env, cwd, exit hooks, signals, and error shapes. |
+| `tests/zig/os_test.zig`, `crypto_test.zig`, `url_test.zig`, `util_test.zig`, `events_test.zig` | Phase 3A/3B surfaces. |
+| `tests/zig/child_process_test.zig` | Sync/async children, output, stdin, signals, and timeouts. |
+| `tests/zig/net_test.zig` | TCP echo, connection refusal, and shutdown with live handles. |
+| `tests/zig/http_test.zig` | `http.createServer` request/response, streamed chunks with a raw chunked framing check, custom status line, declared length and `drain`, `http.request`/`http.get`, `https.createServer`, `https.request` handshake/streaming/insecure, mTLS and PFX certificates, close draining, and shutdown with a live listener. |
+| `tests/zig/pkcs12_test.zig` | PKCS#12/PFX parsing: encrypted PFX to PEM, legacy LibreSSL PBE algorithms, malformed input, and wrong passphrases (modern and legacy). |
+| `tests/zig/fetch_test.zig` | Global `fetch` against a local `http` server, redirect modes, final URLs, in-flight abort, and the `599 Custom Reason` status line. |
+| `tests/fixtures/modules/` | ESM imports, cycles, dynamic import, and resolution errors. |
+| `tests/fixtures/net/` | TCP echo, `ECONNREFUSED`, and live-handle shutdown. |
+| `tests/fixtures/http/` | HTTP server/fetch round trip, `http.request`/`http.get`, server response streaming over raw `net` framing, close draining, and live-listener shutdown. |
+| `tests/fixtures/https/` | `https.createServer` bind/close with PEM, client handshake with CA verification, streaming and `rejectUnauthorized: false`, mTLS, and PFX on both sides. |
+| `tests/fixtures/fetch/` | `fetch`, `Headers`, JSON, POST echo, 404, redirects, redirect modes, final URLs, and abort. |
+| `tests/fixtures/node/` | Curated fixtures ported from the Node.js test suite. |
 
 ## Guards and helpers
 
@@ -38,17 +51,29 @@ The writer is optional. Tests that inspect output pass a `std.Io.Writer.Allocati
 
 `helpers.readResult(allocator, runtime)` evaluates `globalThis.__result`, converts the value to a C string, and duplicates it for the caller.
 
-`helpers.runFixture(allocator, name)` creates a runtime with an allocating writer, joins `fixtures_dir` and the fixture name, evaluates the file, runs the loop, and returns the result string. `fixtures_dir` is supplied by the `fixtures_dir` build option and points at `tests/fixtures`.
+`helpers.runFixture(allocator, name)` creates a runtime with an allocating
+writer, joins `fixtures_dir` and the fixture name, evaluates the file, runs the
+loop, and returns `globalThis.__result`. `helpers.runFixtureStdout` returns the
+captured stdout instead, and `helpers.runFixtureProcess` accepts explicit argv
+and environment plus an exit code. `fixtures_dir` is supplied by the build
+option and points at `tests/fixtures`.
 
 ## Fixture contract
 
 A fixture must:
 
-- Set `globalThis.__result` to the value the test compares.
-- Finish on its own. Clear intervals and do not schedule work that keeps the loop alive indefinitely.
+- Set `globalThis.__result` or print deterministic stdout for the harness.
+- Finish on its own. Clear intervals, close servers and sockets, and do not
+  schedule work that keeps the loop alive indefinitely.
 - Stay within the runtime guards of 5 seconds and 10,000 loop iterations.
+- Clean up temporary files and avoid fixed ports.
 
-The harness does not inject an assertion library. It runs the fixture, reads `globalThis.__result`, and compares the string in Zig. `helpers.readResult` returns `error.MissingResult` if the result value cannot be converted to a C string. `errors.js` is the exception to the normal contract: it intentionally throws inside a timer, and its test expects `error.JavaScriptError` plus `boom` in the captured output.
+The harness does not inject an assertion library. The `errors.js` fixture is the
+exception to the normal contract: it intentionally throws inside a timer, and
+its test expects `error.JavaScriptError` plus `boom` in the captured output.
+
+Network fixtures use a `setTimeout` watchdog that prints `timeout` and calls
+`process.exit(1)` so a hang fails fast instead of waiting for the runtime guard.
 
 ## Running tests
 
@@ -71,14 +96,24 @@ There is no test filter flag. Zig 0.17's test runner does not support one.
 
 ## Current coverage
 
-The suite has 21 tests. It covers arithmetic, syntax errors, promise jobs, invalid timer callbacks, microtask-before-timer ordering, callback arguments, `clearTimeout`, `clearInterval`, the iteration guard, `Promise.all`, `sleep`, chained sleeps, timer cancellation rejecting a pending promise with `timer canceled`, the seven fixtures, the long-timer regression, and the version export.
+The suite covers the runtime core, the module loader, async filesystem,
+process/os/crypto, path/url/util/events, child processes, TCP, HTTP/HTTPS, PFX
+parsing, and fetch. The exact test count changes as coverage grows;
+`zig build test` is the source of truth.
 
 | Test file | Coverage |
 | --- | --- |
-| `runtime_test.zig` | `1 + 1` evaluates to 2; syntax errors report `SyntaxError`; pending promise jobs run; `setTimeout(42, 0)` reports `callback must be a function`; `jsz.version` is non-empty. |
-| `timers_test.zig` | Microtasks run before timers (`mb`); extra callback arguments arrive (`ab`); `clearTimeout` prevents firing; a cleared interval stops at three ticks; an endless interval hits `error.Timeout`. |
-| `promises_test.zig` | `Promise.all` resolves values (`1+2`); `sleep` returns a host-created promise; chained sleeps resolve in order (`ab`); cancelling a pending promise timer rejects it with `timer canceled`. |
-| `fixtures_test.zig` | `timers.js` yields `mbcad`; `intervals.js` yields `ticks=3`; `promises.js` yields `1+2`; `async_await.js` yields `slept`; `sleep_promise.js` yields `ab`; `long_timer.js` reports at least 2190 ms elapsed; `errors.js` surfaces `error.JavaScriptError` and prints `boom`. |
+| `runtime_test.zig` | `1 + 1` evaluates to 2; syntax errors report `SyntaxError`; pending promise jobs run; invalid timer callbacks; `jsz.version`. |
+| `timers_test.zig` | Microtasks before timers; callback arguments; `clearTimeout`; cleared intervals; iteration guard. |
+| `promises_test.zig` | `Promise.all`; `sleep`; chained sleeps; timer cancellation. |
+| `module_test.zig` | Builtin aliases, relative imports, cycles, `import.meta`, and resolution errors. |
+| `fs_test.zig` | Read/write/append/copy/rm/mkdir/readdir/stat/realpath and descriptor APIs; sync guards. |
+| `process_test.zig`, `os_test.zig`, `crypto_test.zig`, `url_test.zig`, `util_test.zig`, `events_test.zig` | Phase 3A/3B behavior. |
+| `child_process_test.zig` | `spawnSync`/`execSync`, async streams, stdin, signals, env/cwd, and timeouts. |
+| `net_test.zig` | TCP echo (`connected`, `echo:ping`, `server-closed`), `ECONNREFUSED`, and `process.exit` with live handles. |
+| `http_test.zig` | `http.createServer` with fetch round trips, keep-alive, `server.close()` draining, streamed response chunks and raw framing, custom status line, `drain`, `http.request`/`http.get`, `https.createServer` bind/close, `https.request` handshake and streaming, mTLS/PFX, and shutdown with a live listener. |
+| `pkcs12_test.zig` | PFX parse to PEM with PBES2/AES and legacy PBE, malformed input, wrong passphrase. |
+| `fetch_test.zig` | Text, JSON, POST echo, response headers, 404, redirect following, redirect modes, final URLs, in-flight abort, and an arbitrary `599 Custom Reason`. |
 
 ## Adding a test
 
@@ -92,10 +127,12 @@ The suite has 21 tests. It covers arithmetic, syntax errors, promise jobs, inval
 
 To add a fixture:
 
-1. Create `tests/fixtures/<name>.js`.
-2. Set `globalThis.__result` to the expected string.
-3. Clear any intervals so the loop terminates.
-4. Add a test in `tests/zig/fixtures_test.zig` that calls `helpers.runFixture(std.testing.allocator, "<name>.js")` and compares the returned string.
+1. Create `tests/fixtures/<name>.js` or `.mjs`.
+2. Set `globalThis.__result` or print deterministic stdout.
+3. Clear intervals, close servers/sockets, and clean up temporary files.
+4. Add a test in the matching `tests/zig/*_test.zig` that calls
+   `helpers.runFixture`, `helpers.runFixtureStdout`, or
+   `helpers.runFixtureProcess` and compares the result.
 
 ## CI and hooks
 

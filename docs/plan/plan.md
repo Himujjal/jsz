@@ -1,6 +1,6 @@
 # jsz Node.js 90% compatibility plan
 
-Status: Phases 0, 1, 2, 3A, 3B, 4 implemented; see §15 Backlog
+Status: Phases 0, 1, 2, 3A, 3B, 4, 5 implemented; see §15 Backlog
 Target runtime: Zig 0.17.0, QuickJS-ng 0.17.0 (via `zig-quickjs-ng`, pinned
 in `build.zig.zon`), zio 0.19.0
 Target Node semantics: Node.js 22 LTS, POSIX first, Windows best-effort
@@ -38,10 +38,12 @@ The 90% target adds:
 `fs` is asynchronous only: the callback API and `fs/promises` are implemented,
 and `*Sync` entry points throw `ERR_METHOD_NOT_IMPLEMENTED` (§1.1, §7.2).
 
-The last 10% is explicitly deferred: full streams, `https.request`,
-`https.createServer`, ciphers/key generation/signing, `webcrypto.subtle`,
-`crypto.timingSafeEqual`, `fs.watch`, `net`, `tls`, `dns`, `zlib`,
+The last 10% is explicitly deferred: full streams, streaming `fetch` and HTTP
+request bodies, trailers, interim 1xx responses, ciphers/key generation/signing,
+`webcrypto.subtle`, `crypto.timingSafeEqual`, `fs.watch`, `tls`, `dns`, `zlib`,
 `worker_threads`, `readline`, `assert`.
+TCP `node:net`, `http.request`/`http.get`, `https.createServer`, and
+`https.request`/`https.get` with TLS options are implemented.
 
 ### 1.1 Core design decisions
 
@@ -56,7 +58,7 @@ The last 10% is explicitly deferred: full streams, `https.request`,
 | Async work runs in zio tasks that touch only host buffers, never QuickJS | No cross-task JS values, no locking. Completions are delivered as messages. |
 | `fs` is async-only; no `*Sync` entry points | Every fs call runs in a zio I/O task, so a slow syscall can never stall timers or the event loop. `*Sync` names throw `ERR_METHOD_NOT_IMPLEMENTED`; `existsSync` is absent. |
 | `std.Io` is the syscall surface, implemented by zio (`Runtime.io()`) | `std.Io.Dir`, `std.process.spawn`, `std.http.Client/Server` all run over zio without adapter code. |
-| `http.createServer` only; no `https.createServer` | Zig std has a TLS client, not a TLS server. |
+| `http.createServer` and `https.createServer`; `https.request` shares the `fetch` client | Zig std has no TLS server; dusty supplies one, and its TLS client serves both `fetch` and `https.request`. |
 | `fetch` buffers the response body | Correct for the 90% set; streaming bodies are part of the deferred stream work. |
 
 ---
@@ -907,6 +909,24 @@ is smaller than a C boundary that fixes up `std.Uri` output.
 
 #### `http.createServer`
 
+> **Implementation note (2026-10-28):** the shipped transport is a vendored
+> dusty 0.5.0 (`vendor/dusty`), not `std.http.Server`. The vendored copy patches
+> the response status line to carry a numeric code and a caller-supplied reason
+> phrase, and patches the client parser to accept codes its `Status` enum does
+> not name. One `dusty.Server(Server)` runs per JS server; dusty owns accept,
+> parsing, keep-alive, and writing. The route handler buffers the request body
+> (1 MiB cap), sends a request job to the JS task, waits on a `zio.Condition`
+> for `res.end`, and answers through one of two paths: `respond` for a single
+> buffered body, or `streamStart`/`streamWrite`/`streamEnd`/`streamAbort` for
+> chunked streaming with a 64 KiB high-water queue, a 16 KiB low-water mark, and
+> a `drain` job. `server.close()` cancels the dusty run task. On the client
+> side, `src/fetch.zig` serves `fetch`, `http.request`/`http.get`, and
+> `https.request`/`https.get`: the head settles first, then each body chunk is
+> pulled with one `ack` per read (16 KiB), and each distinct TLS configuration
+> gets its own cached `dusty.Client` and connection pool. The
+> `std.http.Server` flow below is retained as the original design record; see
+> §15.6 for current deviations.
+
 ```js
 import { createServer } from 'node:http';
 const server = createServer((req, res) => {
@@ -973,9 +993,10 @@ Native flow:
 - `close(cb)` stops accepting, waits for open connections (with a short grace
   period), then calls back.
 
-Not implemented: `http.request`/`http.get`, upgrade/WebSocket, chunked request
-streaming, trailers, `Expect: 100-continue` beyond std's handling, and
-`https.createServer`.
+Not implemented: upgrade/WebSocket, request-body streaming, trailers, and
+`Expect: 100-continue` beyond dusty's handling. Server responses stream through
+`res.write`; client responses stream through `IncomingMessage`, as described in
+the implementation note above and in §15.6.
 
 #### `fetch`
 
@@ -1329,10 +1350,12 @@ Notes:
   `request` + `receiveHead` for headers and body, so use that path.
 - `Client` auto-loads and rescans the system CA bundle (verified in
   `std/http/Client.zig`), so HTTPS needs no extra setup.
-- `std.http.Server` has no TLS variant, hence no `https.createServer`.
+- `std.http.Server` has no TLS variant; `https.createServer` instead uses
+  dusty's TLS listener (`dusty.ServerConfig.Tls`).
 - `Request.respond` buffers the whole body. `res.write` accumulates in JS and
   `res.end` performs a single respond. Large responses hold the full body in
-  memory; document this limit.
+  memory; document this limit. **Superseded (2026-10-28):** dusty's streaming
+  path sends `res.write` chunks as they arrive; see §7.6.
 
 ### 8.7 Zig std crypto, encoding, OS, misc
 
@@ -1365,7 +1388,7 @@ workaround.
 
 | Capability | Gap | Plan |
 | --- | --- | --- |
-| TLS server (`https.createServer`) | `std.crypto.tls` has a client only | deferred; `http.createServer` only |
+| TLS server (`https.createServer`) | `std.crypto.tls` has a client only | implemented through dusty's TLS listener |
 | `fs.truncate` | no path-level truncate | open + `File.setLength(io, len)` |
 | `fs.watch` | no API | deferred |
 | `os.freemem`/`totalmem` | no portable API | libc `sysctl`/`sysinfo` per OS, or omit |
@@ -1611,7 +1634,7 @@ Test harness changes:
 | QuickJS string creation from invalid UTF-8 | TextDecoder correctness | test replacement behavior; add explicit U+FFFD handling |
 | `std.http.Server` body buffering | memory pressure | cap request/response size; document |
 | `std.http.Client` concurrency | connection-pool contention | one shared client; each fetch runs in a child task; measure later |
-| No TLS server | `https.createServer` missing | documented deferral; users can terminate TLS in a proxy |
+| TLS server option coverage | resolved 2026-10-28: PEM, `pfx`+`passphrase`, `ca`, `requestCert`, and `rejectUnauthorized` are wired | PFX MAC verification, RC4 PFX, and non-AES PBES2 remain unsupported; keep `tests/zig/pkcs12_test.zig` aligned | - |
 | No `*Sync` fs APIs | libraries and CLIs that call `readFileSync`/`mkdirSync` fail | explicit `ERR_METHOD_NOT_IMPLEMENTED` naming the async alternative; document the deviation in the README compatibility table |
 | `process.env` mutation semantics | child env mismatch | verify `Environ.Map` mutation in Phase 3; if it cannot mutate, rebuild the map per spawn |
 | Unhandled rejections | silent failures in async code | follow-up: track rejected promises without handlers and print a warning |
@@ -1638,7 +1661,7 @@ Open questions:
 ## 12. Appendix A - coverage matrix
 
 Legend: `now` = exists today, `plan` = in this plan, `defer` = last 10%.
-Statuses are the plan-time snapshot; live status and open work are in §15.
+Statuses are refreshed as phases land; live status and open work are in §15.
 
 | API | Status | Phase |
 | --- | --- | --- |
@@ -1666,9 +1689,12 @@ Statuses are the plan-time snapshot; live status and open work are in §15.
 | `child_process.fork` | defer | - |
 | `URL`, `URLSearchParams` | plan | 3B |
 | `url.pathToFileURL`, `fileURLToPath` | plan | 3B |
-| `http.createServer` | plan | 5 |
-| `http.request`, `https.*` | defer | - |
-| `fetch`, `Headers`, `Response` | plan | 5 |
+| `http.createServer` | now | 5 |
+| `http.request`/`http.get` (streaming response bodies) | now | 5 |
+| `https.createServer` (PEM, `pfx`, mTLS) | now | 5 |
+| `https.request`/`https.get`, TLS client options | now | 5 |
+| `fetch`, `Headers`, `Response` | now | 5 |
+| `net` TCP servers/clients | now | 5 |
 | `crypto.createHash`, `createHmac` | plan | 3A |
 | `crypto.randomBytes/UUID/randomInt/getRandomValues` | plan | 3A |
 | `crypto.timingSafeEqual`, `webcrypto.subtle` | defer | - |
@@ -1735,7 +1761,7 @@ jsz script.mjs
 
 ## 15. Backlog
 
-Status snapshot for this section (2026-10-27):
+Status snapshot for this section (2026-10-28):
 
 - Phase 0 (module foundation) and Phase 1 (async core, encoding, Buffer) are
   complete.
@@ -1753,7 +1779,12 @@ Status snapshot for this section (2026-10-27):
   `timeout`/`killSignal`, `AbortSignal`, signal validation and `kill(0)`,
   `ref`/`unref`, env/cwd/shell/maxBuffer, and loop refs while a child lives.
   Remaining deviations are follow-ups, not stubs (§15.5).
-- Phases 5 (`http`/`fetch`) and 6 (fidelity/hardening) have not started.
+- Phase 5 (`http`/`https`/`fetch`/TCP `net`) is implemented over vendored dusty
+  0.5.0. The HTTP/HTTPS server uses `dusty.Server`; `fetch` and the HTTP/HTTPS
+  client use `dusty.Client`; TCP uses zio. Server responses and client response
+  bodies stream; request bodies and `fetch` bodies are buffered. Deviations and
+  follow-ups are in §15.6.
+- Phase 6 (fidelity/hardening) has not started.
 
 This section is the single list of work intentionally left undone. Each item
 names the phase that should pick it up and a priority:
@@ -1803,7 +1834,7 @@ names the phase that should pick it up and a priority:
 | `path.win32` on a Windows host | pure string logic, exercised only on POSIX | Add Windows CI or a `@hasDecl` guarded test matrix | P3 |
 | `URL` IDNA / punycode | non-ASCII hosts stay percent-encoded; no `domainToASCII`/`domainToUnicode` | Punycode is out of the 90% set; document | P3 |
 | Legacy `url.parse`/`format`/`resolve` | not implemented | Deprecated in Node; keep omitted | P3 |
-| `url.urlToHttpOptions` | not implemented | Trivial once `http.request` lands (Phase 5) | P3 |
+| `url.urlToHttpOptions` | implemented in `url.js` and exported from `node:url` | Keep aligned with `http.request` options | P3 |
 | `fileURLToPath` edge cases | POSIX only: no drive letters, encoded NUL rejected (Node allows it) | Add Windows drive handling with the Windows work | P2 |
 | `node:_url` | empty native stub; helpers are pure JS | Delete the registry entry, or move `pathToFileURL`/`fileURLToPath` percent-encoding there if JS becomes a bottleneck | P3 |
 | `util.inspect` fidelity | `[Circular]` instead of `<ref *1>`, Error prints the stack head, Promise always `<pending>`, `ArrayBuffer` prints `ByteLength`, `%j` on BigInt falls back to `[Circular]`, simplified wrapping | Improve only where fixtures or users depend on the exact shape | P3 |
@@ -1858,17 +1889,46 @@ Node test ports.
 | `AbortSignal` | Minimal EventEmitter-based `AbortController`/`AbortSignal` (`aborted`, `reason`, `addEventListener`, `throwIfAborted`, static `timeout`/`abort`); no `DOMException`, `EventTarget`, or `AbortSignal.any` | Expand with the fetch/EventTarget work | P3 |
 | Async `timeout` timer | JS timer keeps the loop alive even if the child is `unref()`d | Unref the timer with the child | P3 |
 
-### 15.6 Deferred last 10% (unchanged)
+### 15.6 Phase 5 follow-ups (http, fetch, net)
 
-Full streams, `http.request`/`http.get`, `https.*` (including
-`https.createServer`), TLS server, `net`, `tls`, `dns`, `zlib`,
+State as of 2026-10-28. Implemented rows are exercised by
+`tests/zig/http_test.zig`, `tests/zig/pkcs12_test.zig`, and the `http` and
+`https` fixtures; the unstreamed parts remain open work.
+
+| Item | Current state | Next step | Priority |
+| --- | --- | --- | --- |
+| HTTP response streaming | implemented: the first `write`/`flushHeaders` commits the status line and headers (`streamStart`), `streamWrite` queues chunks for the dusty handler to frame, and `streamEnd` terminates. A 64 KiB high-water queue returns false from `write` and a `drain` job fires below 16 KiB; `destroy` calls `streamAbort`. Headers are immutable after send (`ERR_HTTP_HEADERS_SENT`). Not a `Writable`: no `cork`/`uncork`, `writev`, or `writableLength` | Move the queue onto a `Writable` once streams land | P2 |
+| `http.request`/`http.get` | implemented over the streaming `dusty.Client`: `ClientRequest` writes/end, then `response` emits `IncomingMessage` `data`/`end`/`close` with ack-based pause/resume and 16 KiB reads; `complete` is false until EOF; no redirects; `url.urlToHttpOptions` is exported | Add `socket.encrypted` and redirect following if callers need them | P3 |
+| `https.request`/`https.get` | implemented on the same streaming path with `ca` (string/Buffer/array), `cert`+`key`, `pfx`+`passphrase`, and `rejectUnauthorized` (default true). `servername` is accepted but ignored (dusty derives SNI from the URL). Each distinct TLS configuration has its own cached `dusty.Client` and connection pool | Add a SNI override if dusty exposes one | P3 |
+| `statusMessage` | implemented: the patched dusty writes the caller's reason phrase on the status line; an absent phrase falls back to `STATUS_CODES[code] || 'unknown'`; CR/LF raises `ERR_INVALID_CHAR` | Keep the patch in sync when dusty is upgraded | P3 |
+| Arbitrary status codes | implemented for 100-999: the response path is numeric and the patched client parser accepts codes its `Status` enum does not name; `fetch` asserts `599 Custom Reason` | Re-apply the patch on every dusty bump | P3 |
+| HTTPS server | implemented: PEM `cert`/`key`, `pfx`+`passphrase` (pure-Zig PKCS#12 in `src/pkcs12.zig`), `ca`, `requestCert`, and `rejectUnauthorized` map to dusty's `ServerConfig.Tls` and `client_auth` (`.require`/`.request`). PFX MAC verification, RC4 PFX, and non-AES PBES2 are rejected | Add MAC verification if a fixture requires it | P3 |
+| `server.close()` semantics | stops accepting and lets in-flight handlers finish through dusty's drain; the callback and `close` event run after the drain, not on a forced 503 | Keep aligned if dusty's shutdown policy changes | P2 |
+| `fetch` bodies | response bodies are read whole and capped at 10 MiB; `res.text()`/`json()`/`bytes()` are buffered. Request bodies are sent as one buffer | Stream the response body and request body once streams land | P2 |
+| `fetch` reason phrases | HTTP/1.1 reason phrases come from the parser; HTTP/2 responses do not preserve the wire reason phrase | Document the HTTP/2 difference | P3 |
+| HTTP request bodies | buffered whole by the dusty handler, 1 MiB cap; `req` has no incremental read | Add a pull-based body stream in `src/http.zig` | P2 |
+| Upgrade, trailers, `Expect: 100-continue` | not implemented beyond dusty's head handling | Defer with WebSocket support | P3 |
+| `fetch` final URL / redirects | implemented in `fetch.js` as a manual redirect loop (max 5): `Response.url` is final, `redirected` is accurate, and `redirect: 'error'/'manual'` behave like Node | None for the 90% set | P3 |
+| `fetch` in-flight abort | implemented by cancelling the zio request task from the JS `AbortSignal`; the promise rejects with `ABORT_ERR` | None for the 90% set | P3 |
+| TCP teardown latency | read and accept wait with `.none`; `destroy()`/`closeServer()` cancel the task instead of polling | A stalled DNS lookup in the `HostName` fallback may still delay cancellation | P3 |
+| `net.Socket.destroy()` while connecting | implemented: the connector is taken out and canceled; a canceled connect still emits `close` | Same DNS-lookup caveat as above | P3 |
+
+### 15.7 Deferred last 10%
+
+Full streams, streaming `fetch` and HTTP request bodies, trailers, interim 1xx
+responses, `socket.encrypted`, the `tls` module, `dns`, `zlib`,
 `worker_threads`, `readline`, `assert`, `child_process.fork`,
-`webcrypto.subtle`, ciphers/key generation/signing, `fs.watch`.
+`webcrypto.subtle`, ciphers/key generation/signing, `fs.watch`, PFX MAC
+verification, RC4 PFX, and non-AES PBES2.
+
+`https.request`, `https.get`, and the `https` client/server TLS options
+(`ca`, `cert`/`key`, `pfx`/`passphrase`, `rejectUnauthorized`, `requestCert`)
+moved out of this list on 2026-10-28.
 
 `crypto.timingSafeEqual` moved out of this list: it is implemented in Phase 3A
 and should be marked `now` when Appendix A is refreshed.
 
-### 15.7 Testing and documentation
+### 15.8 Testing and documentation
 
 | Item | Current state | Next step | Priority |
 | --- | --- | --- | --- |

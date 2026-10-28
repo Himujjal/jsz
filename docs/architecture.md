@@ -1,6 +1,15 @@
 # Architecture
 
-jsz is a single-process, single-threaded JavaScript runtime. Zig owns the process and the event loop, QuickJS executes JavaScript, and zio provides the runtime clock and sleeping. Every QuickJS call happens on the main zio task; there is no cross-thread JavaScript access.
+> **Note (2026-10-28):** phases 0-5 add the ESM loader, async filesystem,
+> process/os/crypto, child processes, TCP `net`, a dusty-backed HTTP/HTTPS
+> server and client, and `fetch`. Server responses and client response bodies
+> stream; request bodies and `fetch` bodies stay buffered. QuickJS still runs on
+> the single JS task; file, child, network, and fetch work runs in zio tasks and
+> completes through the queue described below. The core event-loop and host
+> sections remain accurate; see [the plan](plan/plan.md) for the per-module
+> layering.
+
+jsz is a single-process, single-threaded JavaScript runtime. Zig owns the process and the event loop, QuickJS executes JavaScript, and zio provides the runtime clock, timers, and I/O. Every QuickJS call happens on the JS task; there is no cross-thread JavaScript access.
 
 ## Components
 
@@ -164,11 +173,92 @@ Job draining is a loop over `js_rt.isJobPending()` and `js_rt.executePendingJob(
 - `Runtime.eval` owns its sentinel copy only for the duration of the call. `evalFile` owns both the sentinel source and sentinel filename for the duration of the call.
 - QuickJS values returned to callers are owned by the caller and must be deinitialized with the runtime context.
 
+## HTTP, HTTPS, and fetch
+
+HTTP and HTTPS share one transport: a vendored copy of dusty 0.5.0 in
+`vendor/dusty`. The vendored copy differs from upstream in two places. The
+server can write a status line from a numeric code plus a caller-supplied
+reason phrase, and the client parser accepts status codes that dusty's `Status`
+enum does not name. Everything else (accept loop, parsing, keep-alive, chunked
+framing, TLS handshake) is upstream dusty.
+
+### Server path
+
+`src/http.zig` owns one `dusty.Server` per JavaScript `http.Server` or
+`https.Server`. The dusty handler reads the request body whole, capped at
+1 MiB, posts a request job to the JS task, and parks until JavaScript answers.
+`src/js/http.zig` exposes the native surface and `src/builtins/http.js` layers
+`IncomingMessage`, `ServerResponse`, and `Server` on top of it.
+
+A response takes one of two paths:
+
+- **Buffered.** If the handler never calls `write` or `flushHeaders`, `end`
+  hands the accumulated body to `respond`. Dusty writes one response with a
+  `Content-Length`.
+- **Streamed.** The first `write` or `flushHeaders` calls `streamStart`, which
+  commits the status line and headers. `streamWrite` copies a chunk into a
+  per-connection queue and the native task drains it into a chunked body, so
+  bytes reach the wire before `end`. `streamEnd` writes the terminating chunk
+  and `streamAbort` fails the handler so the connection closes.
+
+Backpressure is a queue with a 64 KiB high-water mark and a 16 KiB low-water
+mark. `streamWrite` returns false at the high-water mark, the native task posts
+a `drain` job once the queue falls below the low-water mark, and the JS facade
+re-emits `drain` on the response. The facade rejects header changes after the
+status line is sent with `ERR_HTTP_HEADERS_SENT`. `statusCode` accepts 100-999;
+the default reason phrase is `STATUS_CODES[code] || 'unknown'`, and
+`statusMessage` overrides it. A newline or carriage return in the reason phrase
+raises `ERR_INVALID_CHAR`.
+
+### Client path
+
+`src/fetch.zig` is the single dusty client coordinator. It is used by
+`fetch`, `http.request`/`http.get`, and `https.request`/`https.get`.
+
+A client request settles in two stages. The head job carries the status line,
+headers, and final URL. The body is then pulled one chunk at a time: the native
+task waits for an `ack` from JavaScript before each read, reads at most 16 KiB,
+and posts a chunk job. The facade (`src/builtins/http.js`) emits `data` per
+chunk, then `end` and `close` at EOF, and sets `complete` only when the stream
+ends. `pause` stops acking, `resume` restarts the pump, and `destroy` aborts the
+native request. A body under 16 KiB therefore arrives as exactly one `data`
+event.
+
+TLS is configured per request, not per client. Each request carries a
+`TlsRequest` with `ca`, `cert`, `key`, and `reject_unauthorized`.
+`Fetch.clientFor` hashes those fields and keeps one `dusty.Client` per distinct
+configuration, because the TLS config and the connection pool are client-wide.
+`servername` is accepted by the facade and ignored; dusty derives the SNI name
+from the URL.
+
+### TLS server options and PFX
+
+`https.createServer` branches to a TLS listener when `src/http.zig` receives a
+`TlsMaterial`. `src/builtins/https.js` resolves the options before that point:
+
+| Option | Behavior |
+| --- | --- |
+| `cert` + `key` | PEM string, `Buffer`, or `ArrayBuffer` |
+| `pfx` + `passphrase` | parsed by `src/pkcs12.zig` into a PEM chain and PKCS#8 key |
+| `ca` | string, `Buffer`, or array, joined into one PEM bundle |
+| `requestCert` | enables dusty's `client_auth`; `ca` is required |
+| `rejectUnauthorized` | `.require` client certificates when true, `.request` when false |
+
+`src/pkcs12.zig` is a pure-Zig PKCS#12 reader. It handles plaintext, PBES2
+(AES-CBC), and legacy PKCS#12 PBE (SHA-1 with 3DES or RC2), plus cert bags, key
+bags, and shrouded key bags. It carries its own DES, RC2, and AES block ciphers:
+Zig 0.17 std has no DES or RC2, and its AES covers only 128/256-bit keys while
+PFX files may use AES-192. It skips MAC verification, so a wrong passphrase is
+detected by decryption padding instead, and it rejects RC4 PFX and non-AES
+PBES2 schemes.
+
 ## Dependencies and toolchain
 
 Dependencies are pinned by commit in `build.zig.zon`:
 
 - `Inqnuam/zig-quickjs-ng`
 - `lalinsky/zio`
+- `lalinsky/dusty` 0.5.0, vendored under `vendor/dusty` with the status-line
+  and parser patch
 
 The project targets Zig 0.17.0 and links libc. The build produces a single `jsz` executable.

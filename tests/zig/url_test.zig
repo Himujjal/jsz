@@ -65,7 +65,8 @@ test "url parses, serializes, and round-trips file URLs" {
         \\file-host=ERR_INVALID_FILE_URL_HOST
         \\file-encoded-slash=ERR_INVALID_FILE_URL_PATH
         \\file-null=ERR_INVALID_FILE_URL_PATH
-        \\default-export=function,function,function,function
+        \\http-options=https:|a|8443|/x?y|user:pa@ss|https://user:pa%40ss@a:8443/x?y#z
+        \\default-export=function,function,function,function,function
         \\string=true
         \\json="https://a/b?g=h&x=a+b#d"
         \\

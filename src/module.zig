@@ -7,6 +7,10 @@ const process_native = @import("js/process.zig");
 const crypto_native = @import("js/crypto.zig");
 const url_native = @import("js/url.zig");
 const child_process_native = @import("js/child_process.zig");
+const net_native = @import("js/net.zig");
+const http_native = @import("js/http.zig");
+const fetch_native = @import("js/fetch.zig");
+const pkcs12_native = @import("js/pkcs12.zig");
 
 pub const max_module_bytes = 16 * 1024 * 1024;
 
@@ -34,6 +38,14 @@ pub const builtin_list = [_]Builtin{
     .{ .name = "node:events", .source = @embedFile("builtins/events.js") },
     .{ .name = "node:_child_process", .source = "", .native = true },
     .{ .name = "node:child_process", .source = @embedFile("builtins/child_process.js") },
+    .{ .name = "node:_net", .source = "", .native = true },
+    .{ .name = "node:net", .source = @embedFile("builtins/net.js") },
+    .{ .name = "node:_fetch", .source = "", .native = true },
+    .{ .name = "node:_fetch_js", .source = @embedFile("builtins/fetch.js") },
+    .{ .name = "node:_http", .source = "", .native = true },
+    .{ .name = "node:http", .source = @embedFile("builtins/http.js") },
+    .{ .name = "node:_pkcs12", .source = "", .native = true },
+    .{ .name = "node:https", .source = @embedFile("builtins/https.js") },
 };
 
 const probing_suffixes = [_][]const u8{ "", ".js", ".mjs", "/index.js", "/index.mjs" };
@@ -335,6 +347,14 @@ fn loadNative(ctx: *quickjs.Context, name: []const u8) ?*quickjs.ModuleDef {
         url_native.initModule(ctx)
     else if (std.mem.eql(u8, name, "node:_child_process"))
         child_process_native.initModule(ctx)
+    else if (std.mem.eql(u8, name, "node:_net"))
+        net_native.initModule(ctx)
+    else if (std.mem.eql(u8, name, "node:_http"))
+        http_native.initModule(ctx)
+    else if (std.mem.eql(u8, name, "node:_fetch"))
+        fetch_native.initModule(ctx)
+    else if (std.mem.eql(u8, name, "node:_pkcs12"))
+        pkcs12_native.initModule(ctx)
     else
         null;
 

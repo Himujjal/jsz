@@ -1,0 +1,351 @@
+const std = @import("std");
+const tls = @import("tls");
+
+/// Where a TLS peer's certificate authorities are loaded from. Shared by the
+/// client (verifying server certificates) and the server (verifying client
+/// certificates under mutual TLS).
+pub const TlsCa = union(enum) {
+    /// The platform trust store.
+    system,
+    /// A single PEM file holding one or more certificates.
+    file: TlsPath,
+    /// A directory of PEM files, each holding one or more certificates.
+    dir: TlsPath,
+    /// PEM text in memory holding one or more certificates. Borrowed like a
+    /// path: a server reads it in listen(), a client on its first TLS
+    /// connection, so it must outlive the `Client`.
+    bytes: []const u8,
+    /// Trust nothing. Rejected unless the side using it says otherwise.
+    none,
+
+    /// Reads the certificates into a fresh bundle owned by the caller.
+    pub fn load(self: TlsCa, allocator: std.mem.Allocator, io: std.Io) !std.crypto.Certificate.Bundle {
+        const now = std.Io.Clock.real.now(io);
+
+        var bundle: std.crypto.Certificate.Bundle = .empty;
+        errdefer bundle.deinit(allocator);
+        switch (self) {
+            .system => try bundle.rescan(allocator, io, now),
+            .file => |src| try bundle.addCertsFromFilePath(
+                allocator,
+                io,
+                now,
+                src.dir orelse std.Io.Dir.cwd(),
+                src.path,
+            ),
+            .dir => |src| try bundle.addCertsFromDirPath(
+                allocator,
+                io,
+                src.dir orelse std.Io.Dir.cwd(),
+                src.path,
+            ),
+            .bytes => |pem| try addCertsFromPem(&bundle, allocator, pem, now.toSeconds()),
+            .none => {},
+        }
+        return bundle;
+    }
+};
+
+/// `Bundle.addCertsFromFile` for PEM text already in memory.
+fn addCertsFromPem(bundle: *std.crypto.Certificate.Bundle, allocator: std.mem.Allocator, pem: []const u8, now_sec: i64) !void {
+    const base64 = std.base64.standard.decoderWithIgnore(" \t\r\n");
+    const begin_marker = "-----BEGIN CERTIFICATE-----";
+    const end_marker = "-----END CERTIFICATE-----";
+
+    const decoded_size_upper_bound = std.math.cast(u32, pem.len / 4 * 3) orelse
+        return error.CertificateAuthorityBundleTooBig;
+    try bundle.bytes.ensureUnusedCapacity(allocator, decoded_size_upper_bound);
+
+    var start_index: usize = 0;
+    while (std.mem.findPos(u8, pem, start_index, begin_marker)) |begin_marker_start| {
+        const cert_start = begin_marker_start + begin_marker.len;
+        const cert_end = std.mem.findPos(u8, pem, cert_start, end_marker) orelse
+            return error.MissingEndCertificateMarker;
+        start_index = cert_end + end_marker.len;
+        const encoded_cert = std.mem.trim(u8, pem[cert_start..cert_end], " \t\r\n");
+        const decoded_start: u32 = @intCast(bundle.bytes.items.len);
+        const dest_buf = bundle.bytes.allocatedSlice()[decoded_start..];
+        bundle.bytes.items.len += try base64.decode(dest_buf, encoded_cert);
+        try bundle.parseCert(allocator, decoded_start, now_sec);
+    }
+}
+
+/// A certificate chain and its private key, presented to the peer: a
+/// server's own certificate, or a client's under mutual TLS.
+///
+/// The key must be PKCS#8 ("BEGIN PRIVATE KEY") or SEC1 ("BEGIN EC PRIVATE
+/// KEY"); passphrase-protected keys are not supported.
+pub const TlsCertificate = union(enum) {
+    /// PEM files: the certificate chain, leaf first, and the private key.
+    file: struct {
+        cert_path: []const u8,
+        key_path: []const u8,
+        /// Directory the paths are resolved against. Defaults to the
+        /// current working directory.
+        dir: ?std.Io.Dir = null,
+    },
+    /// PEM text in memory, for a key from a secret store or generated at
+    /// startup that should never touch disk. Borrowed like the paths: a
+    /// server reads it in listen(), a client on its first TLS connection,
+    /// so it must outlive the `Client`.
+    bytes: struct {
+        cert: []const u8,
+        key: []const u8,
+    },
+
+    /// Reads the certificate chain and key into a pair owned by the caller.
+    pub fn load(self: TlsCertificate, allocator: std.mem.Allocator, io: std.Io) !tls.config.CertKeyPair {
+        return switch (self) {
+            .file => |f| tls.config.CertKeyPair.fromFilePath(
+                allocator,
+                io,
+                f.dir orelse std.Io.Dir.cwd(),
+                f.cert_path,
+                f.key_path,
+            ),
+            .bytes => |b| tls.config.CertKeyPair.fromSlice(allocator, io, b.cert, b.key),
+        };
+    }
+};
+
+/// Kept free past the head in a request's read buffer, which is sized
+/// `buffer_size + body_read_reserve`. `parseHeaders` gives the body reader
+/// whatever the head did not use, and a body reader with no buffer cannot
+/// read; refusing a head that would eat into this is what makes it a reserve
+/// rather than a hope.
+pub const body_read_reserve = 1024;
+
+pub const TlsPath = struct {
+    path: []const u8,
+    /// Directory `path` is resolved against. Defaults to the current working
+    /// directory.
+    dir: ?std.Io.Dir = null,
+};
+
+pub const Address = union(enum) {
+    ip: std.Io.net.IpAddress,
+    unix: std.Io.net.UnixAddress,
+
+    pub fn format(self: Address, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (self) {
+            .ip => |ip| try ip.format(w),
+            .unix => |unix| try w.writeAll(unix.path),
+        }
+    }
+};
+
+/// One socket a server accepts on. `ServerConfig.listeners` holds any number,
+/// each with its own TLS, so one server can serve HTTPS on 443 and plain
+/// HTTP on 80.
+pub const Listener = struct {
+    address: Address,
+    /// When set, every connection accepted here is TLS. Requires the
+    /// `use_tls` build option (enabled by default); with TLS compiled out,
+    /// setting this fails `Server.run`.
+    tls: ?ServerConfig.Tls = null,
+    /// How many connections the kernel accepts on the server's behalf
+    /// while it is not accepting itself. Past this, Linux drops the
+    /// client's SYN, and the client waits a second or more before it
+    /// tries again.
+    ///
+    /// Null asks for the most the system allows: `net.core.somaxconn` on
+    /// Linux, read from /proc/sys/net/core/somaxconn, and the platform's
+    /// `SOMAXCONN` elsewhere, as Go does. The kernel caps a larger value
+    /// to that silently.
+    kernel_backlog: ?u31 = null,
+    /// Sets SO_REUSEADDR (and SO_REUSEPORT on POSIX) on an IP listener.
+    reuse_address: bool = true,
+    /// How many accept loops share the socket. With io_uring, an accept
+    /// completes at most once per trip through the event loop, so a single
+    /// loop takes one connection per trip however many are queued, which
+    /// limits a server taking many short connections. Several accepts
+    /// waiting together let one trip take several. An idle one costs a
+    /// parked task, and on Windows a socket created ahead for the
+    /// connection it will get. Zero is taken as one.
+    ///
+    /// Null picks log2 of the CPUs the process may use, honoring a cgroup
+    /// CPU quota, and at least two: 2 on 4 CPUs, 5 on 48, 7 on 128. Past
+    /// that, more loops on one socket stop paying for themselves, and on
+    /// short connections start to cost.
+    acceptors: ?u16 = null,
+
+    /// The number of accept loops, with `cpu_count` standing in for the
+    /// CPUs the process may use when `acceptors` is null.
+    pub fn acceptorCount(self: *const Listener, cpu_count: usize) u16 {
+        if (self.acceptors) |n| return @max(1, n);
+        return @intCast(@min(@max(2, std.math.log2_int(usize, @max(1, cpu_count))), std.math.maxInt(u16)));
+    }
+};
+
+/// Used when `ServerConfig.listeners` is empty.
+pub const default_listeners = [_]Listener{.{
+    .address = .{ .ip = .{ .ip4 = .loopback(8080) } },
+}};
+
+test "Listener.acceptorCount: log2 of the CPUs, at least two, unless given" {
+    const auto: Listener = .{ .address = undefined };
+    try std.testing.expectEqual(2, auto.acceptorCount(1));
+    try std.testing.expectEqual(2, auto.acceptorCount(4));
+    try std.testing.expectEqual(3, auto.acceptorCount(8));
+    try std.testing.expectEqual(5, auto.acceptorCount(48));
+    try std.testing.expectEqual(7, auto.acceptorCount(128));
+
+    const given: Listener = .{ .address = undefined, .acceptors = 9 };
+    try std.testing.expectEqual(9, given.acceptorCount(128));
+    const zero: Listener = .{ .address = undefined, .acceptors = 0 };
+    try std.testing.expectEqual(1, zero.acceptorCount(128));
+}
+
+pub const ServerConfig = struct {
+    timeout: Timeout = .{},
+    request: Request = .{},
+    response: Response = .{},
+    /// Where the server accepts connections. `Server.run` serves all of
+    /// them. An empty list uses the default, 127.0.0.1:8080. Borrowed for
+    /// the server's life, and requests point back into it through
+    /// `Request.listener`.
+    listeners: []const Listener = &default_listeners,
+    /// Number of reverse-proxy hops between the server and the client. Zero
+    /// reports the socket peer and ignores `X-Forwarded-For`. A positive
+    /// value selects that address from the right of the forwarding chain:
+    /// one trusts the directly connected proxy, two trusts it and the proxy
+    /// before it, and so on.
+    ///
+    /// Only enable this when the server is unreachable except through that
+    /// many trusted proxies. Otherwise a client can supply the header itself
+    /// and choose the address reported to handlers.
+    trusted_proxy_hops: usize = 0,
+    /// How many connections may be open at once. At the cap the server stops
+    /// accepting; what arrives meanwhile waits in the kernel's accept queue,
+    /// `Listener.kernel_backlog` deep. Null lifts the cap.
+    ///
+    /// An open connection costs about 2K, 33K more under TLS, and
+    /// `request.buffer_size + response.write_buffer_size + 9K` more once
+    /// its first request arrives, or only while a request is being served
+    /// with `request.keep_buffers_between_requests` off. A request with a body
+    /// with a `Content-Encoding` takes 70K more while `request.decompress`
+    /// is on.
+    max_connections: ?u32 = 10_000,
+    /// TLS is per listener: see `Listener.tls`.
+    pub const Tls = struct {
+        /// The listener's certificate chain and private key. Loaded by
+        /// listen().
+        certificate: TlsCertificate,
+        /// Ask connecting clients to authenticate with a certificate (mutual
+        /// TLS). Null means client certificates are never requested.
+        client_auth: ?ClientAuth = null,
+        /// Protocols offered through ALPN, in server preference order, for
+        /// example `&.{ "h2", "http/1.1" }`. Empty means no ALPN; a client
+        /// whose offer shares nothing with a non-empty list is handled by the
+        /// TLS module (tls.zig refuses it).
+        alpn_protocols: []const []const u8 = &.{},
+
+        pub const ClientAuth = struct {
+            /// Certificate authorities used to verify client certificates.
+            /// `.none` is rejected by listen().
+            ca: TlsCa,
+            /// `.require` rejects a client that sends no certificate;
+            /// `.request` asks for one but accepts an empty reply.
+            mode: Mode = .require,
+
+            pub const Mode = enum { request, require };
+        };
+    };
+
+    pub const Timeout = struct {
+        /// Maximum time to complete a request, including handler work and the
+        /// response. TLS handshakes use the same timeout as a separate phase.
+        /// Defaults to 30 seconds; set to null for long-lived handlers, or
+        /// replace it from a handler with `Request.setTimeout`.
+        ///
+        /// Costs a second task per connection on any backend but zio, so on
+        /// `std.Io.Threaded` setting either timeout means two threads per
+        /// connection.
+        request: ?std.Io.Duration = .fromSeconds(30),
+        /// Maximum time to keep idle connections open. Defaults to 30 seconds;
+        /// set to null to keep them open indefinitely.
+        keepalive: ?std.Io.Duration = .fromSeconds(30),
+        /// Maximum number of requests per keepalive connection
+        request_count: ?usize = null,
+        /// Maximum time a graceful shutdown waits for the connections still
+        /// in flight. Null waits for all of them, however long they take --
+        /// which for a connection that never closes on its own, such as a
+        /// WebSocket or an event stream, is forever.
+        shutdown: ?std.Io.Duration = .fromSeconds(30),
+    };
+
+    pub const Request = struct {
+        /// Maximum size (bytes) for request body. Applies to the body a
+        /// handler sees, so for a compressed request it bounds what was
+        /// decoded rather than what arrived.
+        ///
+        /// Which is the limit worth enforcing, but note what it costs: a
+        /// request can grow its arena by this much, the pooled arena keeps
+        /// it, and a compressed request reaches it for a fraction of the
+        /// bytes on the wire. Size memory for `max_connections` of these,
+        /// not for what a peer has to send to get one.
+        max_body_size: usize = 1_048_576, // 1MB default
+        /// Undo `Content-Encoding` on request bodies. A coding we cannot
+        /// undo fails the read with `error.UnsupportedContentEncoding`
+        /// rather than handing the handler bytes it would misread.
+        ///
+        /// Turn off to read what the wire carried, whatever it is;
+        /// `Request.content_encoding` says what that was.
+        ///
+        /// Costs about 70K from the request's arena -- a 64K sliding
+        /// window and the decoder -- on the requests that actually have a
+        /// coded body.
+        decompress: bool = true,
+        /// Buffer size (bytes) for reading the request head: the request
+        /// line and all headers. This is also the limit on it -- the parsed
+        /// header names and values are slices into this buffer rather than
+        /// copies, so the head is held whole and cannot be read in pieces.
+        /// A head that does not fit is answered with 431.
+        buffer_size: usize = 16384,
+        /// Whether a keep-alive connection keeps the buffer its requests
+        /// are read into, and their arena, while it waits for the next one.
+        /// Off, it gives them back between requests and takes a set again
+        /// when the next one arrives: an idle connection then holds only
+        /// its own 2K, but every request on a busy one pays for the trip,
+        /// which costs throughput on a server with many cores.
+        keep_buffers_between_requests: bool = true,
+        /// Maximum number of headers allowed in a request
+        max_header_count: usize = 32,
+        /// Maximum number of route parameters (e.g., /user/:id/:action)
+        max_param_count: usize = 8,
+        /// Maximum number of query string parameters
+        max_query_count: usize = 32,
+        /// Maximum number of form fields (application/x-www-form-urlencoded)
+        max_form_count: usize = 32,
+        /// Maximum number of multipart form fields
+        max_multiform_count: usize = 32,
+    };
+
+    pub const Response = struct {
+        /// Buffer size (bytes) for writing to the connection while a request
+        /// is served. A response head and a body that fits behind it go out
+        /// in one write; a streamed chunk, an event or a WebSocket frame is
+        /// assembled in it and sent as it is finished. Taken with the
+        /// request's read buffer, and given back with it. Must not be 0.
+        ///
+        /// Not used on a TLS connection, which writes into the record
+        /// being sent instead.
+        write_buffer_size: usize = 16384,
+    };
+};
+
+test "ServerConfig: connection timeouts are finite by default" {
+    const cfg: ServerConfig = .{};
+    try std.testing.expectEqual(std.Io.Duration.fromSeconds(30), cfg.timeout.request.?);
+    try std.testing.expectEqual(std.Io.Duration.fromSeconds(30), cfg.timeout.keepalive.?);
+    try std.testing.expectEqual(@as(usize, 0), cfg.trusted_proxy_hops);
+}
+
+test "ServerConfig: the default listener is 127.0.0.1:8080" {
+    const cfg: ServerConfig = .{};
+    try std.testing.expectEqual(@as(usize, 1), cfg.listeners.len);
+    const ip = cfg.listeners[0].address.ip;
+    try std.testing.expect(ip == .ip4);
+    try std.testing.expectEqual([4]u8{ 127, 0, 0, 1 }, ip.ip4.bytes);
+    try std.testing.expectEqual(@as(u16, 8080), ip.ip4.port);
+}

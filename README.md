@@ -4,16 +4,25 @@ A small JavaScript runtime written in Zig 0.17 that embeds QuickJS and uses zio 
 
 ## Status
 
-jsz is a learning and systems project, not a Node.js replacement. v0.1 is intentionally small. Its complete supported surface is:
+jsz implements Node.js 22 compatibility phases 0-5 from the
+[plan](docs/plan/plan.md): an ESM module loader, async filesystem, `process`,
+`os`, `crypto`, `child_process`, `path`, `url`, `util`, `events`, `Buffer`,
+TCP (`node:net`), `http.createServer`/`http.request`/`http.get`,
+`https.createServer`/`https.request`/`https.get`, and a global
+`fetch`/`Headers`/`Response`/`Request` over vendored dusty 0.5.0. All I/O runs
+on zio tasks while QuickJS stays on the single JS task.
 
-- `console.log` and `console.error`
-- `setTimeout` / `clearTimeout`
-- `setInterval` / `clearInterval`
-- `sleep(ms)`
-- Native QuickJS Promises, including `then`, `catch`, `finally`, `Promise.all`, and `async` / `await`
-- A CLI that runs script files, evaluates code with `-e` / `--eval`, prints help and version information, and starts a REPL with the `repl` command or no arguments
+HTTP responses stream on both sides: the server sends `res.write` chunks as they
+arrive with a 64 KiB high-water mark driving `drain` backpressure, and client
+response bodies arrive through `IncomingMessage` `data`/`end`/`close`. `https`
+accepts `ca`, `cert`/`key`, `pfx`/`passphrase`, and `rejectUnauthorized` on the
+client and supports PEM, PFX, and mTLS on the server.
 
-v0.1 does not support ES modules or `import`, filesystem access, network access, child processes, npm packages, Node.js API compatibility, TypeScript, or top-level `await` outside async functions. See the [roadmap](docs/roadmap.md) for the full scope, limitations, and possible next steps.
+Still deferred (the last 10%): full Node streams and web streams, streaming
+`fetch` bodies and HTTP request bodies, trailers, interim 1xx responses, the
+`tls` module, `dns`, `zlib`, `worker_threads`, `readline`, `assert`, `fs.watch`,
+`fs` `*Sync` entry points, UDP, and `child_process.fork`. See the
+[roadmap](docs/roadmap.md) for the current list.
 
 ## Requirements
 
@@ -38,16 +47,21 @@ mise run test
 
 ## Supported API
 
-| API | Behavior |
+| Area | Surface |
 | --- | --- |
-| `console.log(...values)` | Converts each value with JavaScript `toString`, joins arguments with spaces, and appends a newline. |
-| `console.error(...values)` | Uses the same formatting and output path as `console.log`. |
-| `setTimeout(callback, delayMs, ...args)` | Schedules a one-shot callback and returns a numeric timer id. |
-| `clearTimeout(id)` | Cancels a pending timeout. |
-| `setInterval(callback, delayMs, ...args)` | Schedules a repeating callback and returns a numeric timer id. |
-| `clearInterval(id)` | Cancels a pending interval. |
-| `sleep(ms)` | Returns a native QuickJS Promise that resolves after the delay. |
-| Promises | Native QuickJS `then`, `catch`, `finally`, `Promise.all`, `async`, and `await`. |
+| Modules | ESM `import`/`export`, `node:` and bare builtin specifiers, `import.meta`, dynamic `import()` |
+| Filesystem | `fs`/`fs/promises` async callbacks and promises; no `*Sync` or `fs.watch` |
+| Process | `process.argv`, `env`, `cwd`, `chdir`, `exit`, `hrtime`, `stdout`/`stderr`, signals, `uncaughtException` |
+| Runtime | `console`, timers, `queueMicrotask`, native Promises, `Buffer`, `TextEncoder`/`TextDecoder`, `atob`/`btoa`, `URL`, `URLSearchParams` |
+| System | `os`, `crypto` (hash, HMAC, random), `path` (posix + win32), `util`, `events`, `child_process` |
+| Network | `net.createServer`/`net.connect` (TCP), `http.createServer`/`http.request`/`http.get`, `https.createServer`/`https.request`/`https.get`, global `fetch`, `Headers`, `Response`, `Request` |
+
+The HTTP server and client use a vendored [dusty](https://github.com/lalinsky/dusty)
+0.5.0 (`vendor/dusty`) over zio's `std.Io` implementation. The vendored copy
+carries a small patch so the response status line can carry a numeric code and a
+caller-supplied reason phrase, and so the client parser accepts status codes its
+`Status` enum does not name. JavaScript is single-threaded; file, child, network,
+and fetch work runs in zio tasks and completes through the event loop.
 
 Timer delays are clamped to 2,147,483,647 ms. A timer callback must be a function.
 
@@ -78,19 +92,23 @@ main();
 ├── src/
 │   ├── main.zig              process entry point; receives std.process.Init
 │   ├── root.zig              public module exports and version string
-│   ├── runtime.zig           owns the zio runtime, QuickJS runtime/context, and event loop
-│   ├── event_loop.zig        timer scheduling, job draining, and run guards
-│   ├── cli/
-│   │   └── cli.zig           argument parsing, script/eval/REPL dispatch, shared stdout writer
-│   └── js/
-│       ├── host.zig          host state stored in the QuickJS context opaque pointer
-│       ├── builtins.zig      installs globals on the QuickJS context
-│       ├── timers.zig        setTimeout, setInterval, clearTimeout, clearInterval
-│       ├── promises.zig      sleep(ms) host promise
-│       └── console.zig       console.log and console.error
+│   ├── runtime.zig           zio runtime, QuickJS runtime/context, host wiring
+│   ├── event_loop.zig        timers, completion queue, job draining, run guards
+│   ├── module.zig            ESM resolver, builtin registry, module loader
+│   ├── jobs.zig              I/O task -> JS task completion queue
+│   ├── fs.zig                async filesystem coordinator
+│   ├── child_process.zig     child-process coordinator
+│   ├── net.zig               TCP server/socket coordinator
+│   ├── http.zig              dusty-backed HTTP server coordinator
+│   ├── fetch.zig             dusty-backed HTTP/HTTPS client coordinator
+│   ├── pkcs12.zig            pure-Zig PKCS#12/PFX parser for `https` `pfx`
+│   ├── builtins/             embedded ESM modules (path, fs, http, https, net, ...)
+│   ├── js/                   native QuickJS modules, host, value helpers
+│   └── cli/cli.zig           argument parsing, script/eval/REPL dispatch
 ├── tests/
 │   ├── zig/                  Zig integration tests and fixture harness
-│   └── fixtures/             JavaScript fixtures used by the test harness
+│   └── fixtures/             JavaScript fixtures, including net/http/https/fetch
+├── vendor/dusty/             dusty 0.5.0 with the numeric status-line patch
 ├── examples/                 runnable demo scripts
 ├── docs/                     architecture, CLI, testing, and roadmap notes
 └── .forgejo/workflows/       Forgejo Actions CI and release workflow
