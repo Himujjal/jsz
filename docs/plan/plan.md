@@ -1,6 +1,6 @@
 # jsz Node.js 90% compatibility plan
 
-Status: Phases 0, 1, 2, 3A, 3B implemented; see §15 Backlog
+Status: Phases 0, 1, 2, 3A, 3B, 4 implemented; see §15 Backlog
 Target runtime: Zig 0.17.0, QuickJS-ng 0.17.0 (via `zig-quickjs-ng`, pinned
 in `build.zig.zon`), zio 0.19.0
 Target Node semantics: Node.js 22 LTS, POSIX first, Windows best-effort
@@ -1747,8 +1747,13 @@ Status snapshot for this section (2026-10-27):
   `events`) are implemented with the deviations listed in §15.2 and §15.3.
   Process lifecycle (`exit`, `SIGINT`, `uncaughtException`, `exitCode`) and
   unhandled-rejection reporting are also implemented (§15.2).
-- Phases 4 (`child_process`), 5 (`http`/`fetch`) and 6 (fidelity/hardening)
-  have not started.
+- Phase 4 (`child_process`) is implemented for the POSIX surface: sync and
+  async `spawn`/`exec`/`execFile`, bounded stdout/stderr flow control with
+  `pause`/`resume`/`pipe`/async iteration, non-blocking stdin with `drain`,
+  `timeout`/`killSignal`, `AbortSignal`, signal validation and `kill(0)`,
+  `ref`/`unref`, env/cwd/shell/maxBuffer, and loop refs while a child lives.
+  Remaining deviations are follow-ups, not stubs (§15.5).
+- Phases 5 (`http`/`fetch`) and 6 (fidelity/hardening) have not started.
 
 This section is the single list of work intentionally left undone. Each item
 names the phase that should pick it up and a priority:
@@ -1827,7 +1832,33 @@ module-evaluation promise without marking it handled, so a caught `import()`
 still surfaced as an unhandled rejection. Re-validate §14's engine gap list
 against 0.17.0 on the next engine bump.
 
-### 15.5 Deferred last 10% (unchanged)
+### 15.5 Phase 4 follow-ups (`child_process`)
+
+Closed since the first Phase 4 landing: bounded output credits, `pause`/
+`resume`/`pipe`/async iteration, non-blocking stdin with `drain`, `timeout`/
+`killSignal`, `AbortSignal`, signal validation and `kill(0)`, `ref`/`unref`,
+per-stream `maxBuffer`, `uid`/`gid`/`windowsHide`/`detached`, and the selected
+Node test ports.
+
+| Item | Current state | Next step | Priority |
+| --- | --- | --- | --- |
+| `ChildProcess.stdout`/`stderr` | Child-specific EventEmitter facade with `data`/`end`, `setEncoding`, `pause`/`resume`, `pipe` with `drain`, async iteration, and bounded native credits (16 × 16 KiB). Not a full `Readable` (`read`, `unshift`, `'readable'`, `unpipe`, async dispose) | Fold the remaining `Readable` methods into the stream work | P3 |
+| `stdout.destroy()` | Sets `destroyed`, pauses, and emits `close`; does not close the pipe read end, so a still-running child can block on a full pipe | Add a native stream-close path | P2 |
+| `stdin.write` callbacks | Invoked on a microtask, not after the bytes are flushed | Add per-chunk completion jobs if flush timing matters | P3 |
+| `stdin` queue | 64 KiB soft limit; `write` returns false and emits `drain`. A caller that ignores false can grow the queue (Node also grows its writable buffer) | Optional hard cap / `highWaterMark` | P3 |
+| Signal handling | Named POSIX signals, numeric 1..64, and `kill(0)` liveness; unknown names throw `ERR_UNKNOWN_SIGNAL`; Windows uses `Child.kill` | Windows signal parity | P3 |
+| Process options | `timeout`, `killSignal`, `AbortSignal`, `uid`/`gid`, `windowsHide`, and `detached` are wired; `fork`, `pipe()`, and fd/`ipc` stdio remain | Add fd/`ipc` with the stream and worker work | P3 |
+| `ref()`/`unref()` | Implemented; an unref'd live child is still killed at runtime shutdown | Decide whether exit should detach instead of kill | P3 |
+| Sync bridge | `spawnSync`/`exec*` block the JS thread on a mutex/cond while a zio task drives child I/O; `MultiReader` needs an executor. Works while JS is on the main thread; a future `Runtime.runMain` that puts JS on the executor would deadlock | Revisit with `runMain`; no public zio API detects an executor today | P2 |
+| Node test porting | Curated fixtures now port `spawn-event`, `spawn-error`, `exec-error`, `exec-encoding`, `execfile`, `spawn-shell`, `spawnsync-kill-signal`, `exec-cwd`, and `exec-env`; the rest of the 27 raw tests remain | Port more as gaps appear | P2 |
+| Windows | `pid` is null and `kill` goes through `Child.kill`; the synchronous timeout watchdog is POSIX-only | Add Windows CI and behavior | P3 |
+| `stdio` forms | String or 3-slot array of `'pipe'`/`'ignore'`/`'inherit'`; fd entries and `'ipc'` are unsupported | Add fd/`ipc` with the stream and worker work | P3 |
+| Spawn error shapes | Approximate messages; `spawnSync` ENOBUFS and `exec*` maxBuffer mapping; exec of a missing command through the shell is 127 (Node parity) | Tighten messages and errno values against Node tests | P3 |
+| Shell quoting | Basic single-quote escaping | Match Node exactly | P3 |
+| `AbortSignal` | Minimal EventEmitter-based `AbortController`/`AbortSignal` (`aborted`, `reason`, `addEventListener`, `throwIfAborted`, static `timeout`/`abort`); no `DOMException`, `EventTarget`, or `AbortSignal.any` | Expand with the fetch/EventTarget work | P3 |
+| Async `timeout` timer | JS timer keeps the loop alive even if the child is `unref()`d | Unref the timer with the child | P3 |
+
+### 15.6 Deferred last 10% (unchanged)
 
 Full streams, `http.request`/`http.get`, `https.*` (including
 `https.createServer`), TLS server, `net`, `tls`, `dns`, `zlib`,
@@ -1837,7 +1868,7 @@ Full streams, `http.request`/`http.get`, `https.*` (including
 `crypto.timingSafeEqual` moved out of this list: it is implemented in Phase 3A
 and should be marked `now` when Appendix A is refreshed.
 
-### 15.6 Testing and documentation
+### 15.7 Testing and documentation
 
 | Item | Current state | Next step | Priority |
 | --- | --- | --- | --- |
