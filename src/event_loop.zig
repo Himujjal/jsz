@@ -1,7 +1,7 @@
 const std = @import("std");
 const quickjs = @import("quickjs");
 const zio = @import("zio");
-const Fs = @import("fs.zig").Fs;
+const jobs = @import("jobs.zig");
 
 const UnhandledRejection = struct {
     promise: quickjs.Value,
@@ -33,7 +33,8 @@ pub const EventLoop = struct {
     started_ns: u64,
     iterations: usize = 0,
     sink: ?*std.ArrayList(u8) = null,
-    fs: ?*Fs = null,
+    /// Shared completion queue for async work (fs today, other subsystems later).
+    queue: ?*jobs.Queue = null,
     /// Node-style "keeps the process alive" counter for live I/O handles.
     ref_count: usize = 0,
     exit_code: u8 = 0,
@@ -154,7 +155,7 @@ pub const EventLoop = struct {
     /// QuickJS; the JS task handles the signal on its next iteration.
     pub fn interrupt(self: *EventLoop) void {
         self.interrupted.store(true, .release);
-        if (self.fs) |fs| fs.queue.notify();
+        if (self.queue) |queue| queue.notify();
     }
 
     fn takeInterrupt(self: *EventLoop) bool {
@@ -282,21 +283,21 @@ pub const EventLoop = struct {
             };
             // Settling fs work enqueues promise jobs; run them before deciding
             // whether the loop has any work left.
-            self.dispatchFs();
+            self.dispatchQueue();
             self.drainJobs() catch |err| {
                 self.failed = true;
                 return err;
             };
 
             const deadline = self.nextDeadline();
-            const fs_pending = if (self.fs) |fs| fs.hasWork() else false;
-            if (deadline == null and !fs_pending and self.ref_count == 0) break;
+            const queue_pending = if (self.queue) |queue| queue.hasWork() else false;
+            if (deadline == null and !queue_pending and self.ref_count == 0) break;
 
             const current = now();
             if (deadline) |next| {
                 if (next > current) {
-                    if (fs_pending) {
-                        self.fs.?.wait(next - current);
+                    if (queue_pending) {
+                        self.queue.?.wait(next - current);
                     } else if (self.sigint_wanted) {
                         // The queue is the only wait a zio signal task can wake.
                         self.waitForWake(next - current);
@@ -307,16 +308,16 @@ pub const EventLoop = struct {
                         };
                     }
                 }
-            } else if (fs_pending) {
-                self.fs.?.wait(null);
+            } else if (queue_pending) {
+                self.queue.?.wait(null);
             } else {
                 // No timer and no queued work, but live handles: hang on the
                 // queue instead of spinning.
-                const fs = self.fs orelse break;
-                fs.wait(null);
+                const queue = self.queue orelse break;
+                queue.wait(null);
             }
 
-            self.dispatchFs();
+            self.dispatchQueue();
             self.drainJobs() catch |err| {
                 self.failed = true;
                 return err;
@@ -333,7 +334,7 @@ pub const EventLoop = struct {
             self.iterations += 1;
         }
 
-        self.dispatchFs();
+        self.dispatchQueue();
         // process.exit must not run handlers for work that was still queued.
         if (!self.stopped) {
             self.drainJobs() catch |err| {
@@ -346,7 +347,7 @@ pub const EventLoop = struct {
 
     pub fn tick(self: *EventLoop) !void {
         try self.drainJobs();
-        self.dispatchFs();
+        self.dispatchQueue();
         self.fireDue(now()) catch |err| {
             self.failed = true;
             return err;
@@ -354,13 +355,13 @@ pub const EventLoop = struct {
         try self.drainJobs();
     }
 
-    fn dispatchFs(self: *EventLoop) void {
-        if (self.fs) |fs| fs.dispatch(self.ctx);
+    fn dispatchQueue(self: *EventLoop) void {
+        if (self.queue) |queue| queue.dispatch(self.ctx);
     }
 
     fn waitForWake(self: *EventLoop, timeout_ns: ?u64) void {
-        if (self.fs) |fs| {
-            fs.wait(timeout_ns);
+        if (self.queue) |queue| {
+            queue.wait(timeout_ns);
         } else if (timeout_ns) |ns| {
             zio.sleep(.fromNanoseconds(ns)) catch {};
         }

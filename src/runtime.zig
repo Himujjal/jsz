@@ -3,6 +3,8 @@ const quickjs = @import("quickjs");
 const zio = @import("zio");
 const EventLoop = @import("event_loop.zig").EventLoop;
 const Fs = @import("fs.zig").Fs;
+const ChildProcesses = @import("child_process.zig").ChildProcesses;
+const jobs = @import("jobs.zig");
 const Host = @import("js/host.zig").Host;
 const builtins = @import("js/builtins.zig");
 const module = @import("module.zig");
@@ -22,7 +24,11 @@ pub const Runtime = struct {
     js_rt: *quickjs.Runtime,
     ctx: *quickjs.Context,
     loop: EventLoop,
+    /// Shared completion queue: async subsystems report finished jobs here and
+    /// the event loop settles them on the JS task.
+    queue: jobs.Queue = undefined,
     fs: Fs = undefined,
+    children: ChildProcesses = undefined,
     host: Host = undefined,
     out: std.ArrayList(u8) = .empty,
     writer: ?*std.Io.Writer = null,
@@ -64,8 +70,12 @@ pub const Runtime = struct {
         self.loop.max_iterations = options.max_iterations;
         self.loop.max_runtime_ns = if (options.max_runtime_ms) |ms| ms *| std.time.ns_per_ms else null;
 
-        self.fs = Fs.init(allocator, zio_rt);
-        self.loop.fs = &self.fs;
+        self.queue = jobs.Queue.init(allocator);
+        errdefer self.queue.deinit();
+
+        self.fs = Fs.init(allocator, zio_rt, &self.queue);
+        self.children = ChildProcesses.init(allocator, zio_rt, &self.queue);
+        self.loop.queue = &self.queue;
 
         self.env_owned = if (options.environ_map == null) std.process.Environ.Map.init(allocator) else null;
         errdefer if (self.env_owned) |*map| map.deinit();
@@ -77,6 +87,8 @@ pub const Runtime = struct {
             .loop = &self.loop,
             .out = &self.out,
             .fs = &self.fs,
+            .rt = zio_rt,
+            .children = &self.children,
             .argv = options.argv orelse &.{},
             .environ = options.environ_map orelse &self.env_owned.?,
         };
@@ -104,7 +116,11 @@ pub const Runtime = struct {
         self.finish();
         self.flush() catch {};
         self.host.deinitCwd();
-        self.fs.deinit(self.ctx);
+        // Live children must be reaped while QuickJS and the queue still exist.
+        self.children.deinit(self.ctx);
+        // QuickJS must still be alive for abort callbacks.
+        self.queue.shutdown(self.ctx);
+        self.queue.deinit();
         self.loop.deinit();
         self.ctx.deinit();
         self.js_rt.deinit();

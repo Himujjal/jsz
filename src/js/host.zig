@@ -1,7 +1,9 @@
 const std = @import("std");
 const quickjs = @import("quickjs");
+const zio = @import("zio");
 const EventLoop = @import("../event_loop.zig").EventLoop;
 const Fs = @import("../fs.zig").Fs;
+const ChildProcesses = @import("../child_process.zig").ChildProcesses;
 
 pub const Host = struct {
     allocator: std.mem.Allocator,
@@ -10,6 +12,8 @@ pub const Host = struct {
     loop: *EventLoop,
     out: *std.ArrayList(u8),
     fs: *Fs,
+    rt: *zio.Runtime,
+    children: *ChildProcesses,
     /// Borrowed process arguments; owned by the caller that outlives the runtime.
     argv: []const []const u8,
     environ: *std.process.Environ.Map,

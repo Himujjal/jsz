@@ -6,6 +6,7 @@ const fs_native = @import("js/fs.zig");
 const process_native = @import("js/process.zig");
 const crypto_native = @import("js/crypto.zig");
 const url_native = @import("js/url.zig");
+const child_process_native = @import("js/child_process.zig");
 
 pub const max_module_bytes = 16 * 1024 * 1024;
 
@@ -31,6 +32,8 @@ pub const builtin_list = [_]Builtin{
     .{ .name = "node:_url", .source = "", .native = true },
     .{ .name = "node:url", .source = @embedFile("builtins/url.js") },
     .{ .name = "node:events", .source = @embedFile("builtins/events.js") },
+    .{ .name = "node:_child_process", .source = "", .native = true },
+    .{ .name = "node:child_process", .source = @embedFile("builtins/child_process.js") },
 };
 
 const probing_suffixes = [_][]const u8{ "", ".js", ".mjs", "/index.js", "/index.mjs" };
@@ -330,6 +333,8 @@ fn loadNative(ctx: *quickjs.Context, name: []const u8) ?*quickjs.ModuleDef {
         crypto_native.initModule(ctx)
     else if (std.mem.eql(u8, name, "node:_url"))
         url_native.initModule(ctx)
+    else if (std.mem.eql(u8, name, "node:_child_process"))
+        child_process_native.initModule(ctx)
     else
         null;
 

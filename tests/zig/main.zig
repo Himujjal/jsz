@@ -20,4 +20,5 @@ test {
     _ = @import("url_test.zig");
     _ = @import("util_test.zig");
     _ = @import("events_test.zig");
+    _ = @import("child_process_test.zig");
 }

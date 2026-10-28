@@ -334,7 +334,7 @@ test "promise continuations run when fs work settles at loop exhaustion" {
     // Let the read finish outside the loop: the first dispatch settles it on
     // the same iteration the loop decides it has no work left.
     var waited: usize = 0;
-    while (runtime.loop.fs.?.queue.hasPending()) : (waited += 1) {
+    while (runtime.queue.hasPending()) : (waited += 1) {
         if (waited == 2000) return error.FsJobNeverCompleted;
         try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
     }

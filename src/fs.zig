@@ -205,20 +205,20 @@ pub const Job = struct {
     }
 };
 
-/// Owns the async fs worker queue. Jobs run in zio tasks and report back here;
-/// only the JS thread touches QuickJS values.
+/// Runs async fs jobs in zio tasks and reports them to the runtime's shared
+/// completion queue; only the JS thread touches QuickJS values.
 pub const Fs = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     rt: *zio.Runtime,
-    queue: jobs.Queue,
+    queue: *jobs.Queue,
 
-    pub fn init(allocator: std.mem.Allocator, rt: *zio.Runtime) Fs {
+    pub fn init(allocator: std.mem.Allocator, rt: *zio.Runtime, queue: *jobs.Queue) Fs {
         return .{
             .allocator = allocator,
             .io = rt.io(),
             .rt = rt,
-            .queue = jobs.Queue.init(allocator),
+            .queue = queue,
         };
     }
 
@@ -246,26 +246,6 @@ pub const Fs = struct {
             return;
         };
         self.queue.complete(&job.link);
-    }
-
-    pub fn hasWork(self: *Fs) bool {
-        return self.queue.hasWork();
-    }
-
-    /// Waits for a completion. A null timeout blocks until one arrives.
-    pub fn wait(self: *Fs, timeout_ns: ?u64) void {
-        self.queue.wait(timeout_ns);
-    }
-
-    /// Settles every completed job on the JS thread, then frees it.
-    pub fn dispatch(self: *Fs, ctx: *quickjs.Context) void {
-        self.queue.dispatch(ctx);
-    }
-
-    /// Stops accepting jobs, waits for in-flight work, and frees leftovers.
-    pub fn deinit(self: *Fs, ctx: *quickjs.Context) void {
-        self.queue.shutdown(ctx);
-        self.queue.deinit();
     }
 
     fn execute(self: *Fs, job: *Job) !Outcome {
