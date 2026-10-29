@@ -12,6 +12,7 @@ const jobs = @import("jobs.zig");
 const Host = @import("js/host.zig").Host;
 const builtins = @import("js/builtins.zig");
 const module = @import("module.zig");
+const Desktop = @import("desktop.zig").Desktop;
 
 pub const Options = struct {
     max_runtime_ms: ?u64 = null,
@@ -20,6 +21,8 @@ pub const Options = struct {
     /// Borrowed process arguments; the caller must outlive the runtime.
     argv: ?[]const []const u8 = null,
     environ_map: ?*std.process.Environ.Map = null,
+    /// Enables the `electron` builtin and the native WebUI backend.
+    desktop: bool = false,
 };
 
 pub const Runtime = struct {
@@ -37,6 +40,7 @@ pub const Runtime = struct {
     http: Http = undefined,
     fetch: Fetch = undefined,
     host: Host = undefined,
+    desktop: ?*Desktop = null,
     out: std.ArrayList(u8) = .empty,
     writer: ?*std.Io.Writer = null,
     env_owned: ?std.process.Environ.Map = null,
@@ -107,9 +111,23 @@ pub const Runtime = struct {
             .argv = options.argv orelse &.{},
             .environ = options.environ_map orelse &self.env_owned.?,
         };
+        if (options.desktop) self.host.role = .main;
         ctx.setOpaque(Host, &self.host);
         self.host.refreshCwd();
         errdefer self.host.deinitCwd();
+
+        if (options.desktop) {
+            const desktop = try Desktop.init(allocator, zio_rt.io(), &self.host, &self.loop, &self.queue);
+            errdefer desktop.deinit();
+            self.desktop = desktop;
+            self.host.desktop = desktop;
+            self.loop.desktop = .{
+                .context = desktop,
+                .pump_fn = pumpDesktop,
+                .active_fn = activeDesktop,
+            };
+        }
+
         try builtins.register(&self.host);
         js_rt.setModuleLoaderFunc(Host, &self.host, module.normalize, module.load);
         js_rt.setHostPromiseRejectionTracker(Host, &self.host, onPromiseRejection);
@@ -131,6 +149,12 @@ pub const Runtime = struct {
         self.finish();
         self.flush() catch {};
         self.host.deinitCwd();
+        if (self.desktop) |desktop| {
+            desktop.deinit();
+            self.desktop = null;
+            self.host.desktop = null;
+            self.loop.desktop = null;
+        }
         // Live children must be reaped while QuickJS and the queue still exist.
         self.children.deinit(self.ctx);
         // Network handles must stop before the queue closes.
@@ -294,6 +318,7 @@ pub const Runtime = struct {
         const result = self.loop.run();
         self.stopSignalWatchers();
         if (result) |_| {} else |_| self.had_error = true;
+        if (self.desktop) |desktop| desktop.quit(self.loop.exit_code);
         self.finish();
         try self.flush();
         return result;
@@ -367,6 +392,16 @@ pub const Runtime = struct {
         self.loop.reportException();
     }
 };
+
+fn pumpDesktop(raw: *anyopaque) void {
+    const desktop: *Desktop = @ptrCast(@alignCast(raw));
+    desktop.pump();
+}
+
+fn activeDesktop(raw: *anyopaque) bool {
+    const desktop: *Desktop = @ptrCast(@alignCast(raw));
+    return desktop.active();
+}
 
 /// Runs on a zio task; it only records the signal and wakes the queue, never
 /// touches QuickJS.

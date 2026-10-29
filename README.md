@@ -30,6 +30,22 @@ Still deferred (the last 10%): full Node streams and web streams, streaming
 `fs` `*Sync` entry points, UDP, and `child_process.fork`. See the
 [roadmap](docs/roadmap.md) for the current list.
 
+## Desktop mode
+
+`jsz --desktop main.mjs` runs an Electron-shaped main-process script against
+the platform WebView (WKWebView on macOS, WebView2 on Windows, WebKitGTK on
+Linux) through zig-webui. The supported subset is `app`, `BrowserWindow`,
+`ipcMain`, `dialog`, and `shell`; preload scripts get `contextBridge` and
+`ipcRenderer`.
+
+```sh
+./zig-out/bin/jsz --desktop examples/electron/main.mjs
+```
+
+`electron` is not an npm package and is unavailable outside `--desktop`.
+`node:electron` remains an unknown builtin. See [docs/cli.md](docs/cli.md) for
+the API and limitations.
+
 ## Requirements
 
 - [mise](https://mise.jdx.dev/), which installs Zig 0.17.0 and hk 2.8.1 from `mise.toml`
@@ -61,6 +77,7 @@ mise run test
 | Runtime | `console` (formatting, `dir`, `trace`, `time`), timers, `queueMicrotask`, native Promises, `performance`, `global`, `Buffer`, `TextEncoder`/`TextDecoder`, `atob`/`btoa`, `URL`, `URLSearchParams` |
 | System | `os`, `crypto` (hash, HMAC, random), `path` (posix + win32), `util`, `events`, `child_process` |
 | Network | `net.createServer`/`net.connect` (TCP), `http.createServer`/`http.request`/`http.get`, `https.createServer`/`https.request`/`https.get`, global `fetch`, `Headers`, `Response`, `Request` |
+| Desktop | Opt-in `jsz --desktop main.mjs` with an Electron-shaped `electron` subset (`app`, `BrowserWindow`, `ipcMain`, `dialog`, `shell`, preload `contextBridge`/`ipcRenderer`) over the platform WebView |
 
 The HTTP server and client use a vendored [dusty](https://github.com/lalinsky/dusty)
 0.5.0 (`vendor/dusty`) over zio's `std.Io` implementation. The vendored copy

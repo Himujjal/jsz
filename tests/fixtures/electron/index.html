@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>jsz electron fixture</title></head>
+<body>
+<output id="result">running</output>
+<script>
+(async () => {
+  const result = document.getElementById('result');
+  try {
+    const echo = await window.desktop.echo('hello');
+    result.textContent = 'echo=' + echo.value;
+    await window.desktop.report('ok:' + echo.value + ':' + echo.url.endsWith('/index.html'));
+  } catch (err) {
+    result.textContent = 'error';
+    try {
+      await window.desktop.report('error:' + (err && err.message));
+    } catch (_) {}
+  }
+})();
+</script>
+</body>
+</html>

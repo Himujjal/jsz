@@ -7,6 +7,7 @@ pub fn build(b: *std.Build) !void {
     const quickjs = b.dependency("quickjs", .{ .target = target, .optimize = optimize });
     const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
     const dusty = b.dependency("dusty", .{ .target = target, .optimize = optimize });
+    const webui = b.dependency("zig_webui", .{ .target = target, .optimize = optimize });
     const dusty_mod = dusty.module("dusty");
     // Dusty's default zio import is a stub; the runtime uses the real one.
     dusty_mod.addImport("zio", zio.module("zio"));
@@ -19,6 +20,7 @@ pub fn build(b: *std.Build) !void {
             .{ .name = "quickjs", .module = quickjs.module("quickjs") },
             .{ .name = "zio", .module = zio.module("zio") },
             .{ .name = "dusty", .module = dusty_mod },
+            .{ .name = "webui", .module = webui.module("webui") },
         },
     });
 

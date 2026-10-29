@@ -34,6 +34,7 @@ that prints `timeout` and exits non-zero when an operation hangs.
 | `tests/zig/pkcs12_test.zig` | PKCS#12/PFX parsing: encrypted PFX to PEM, legacy LibreSSL PBE algorithms, malformed input, and wrong passphrases (modern and legacy). |
 | `tests/zig/fetch_test.zig` | Global `fetch` against a local `http` server, redirect modes, final URLs, in-flight abort, and the `599 Custom Reason` status line. |
 | `tests/zig/differential_test.zig` | Optional parity check: runs the differential corpus through jsz and a real `node`, then compares stdout byte-for-byte. |
+| `tests/zig/electron_test.zig` | `electron` role gating, main-process exports, CLI validation, and an opt-in native-window IPC round trip. |
 | `tests/fixtures/modules/` | ESM imports, cycles, dynamic import, and resolution errors. |
 | `tests/fixtures/net/` | TCP echo, `ECONNREFUSED`, and live-handle shutdown. |
 | `tests/fixtures/http/` | HTTP server/fetch round trip, `http.request`/`http.get`, server response streaming over raw `net` framing, close draining, and live-listener shutdown. |
@@ -41,6 +42,7 @@ that prints `timeout` and exits non-zero when an operation hangs.
 | `tests/fixtures/fetch/` | `fetch`, `Headers`, JSON, POST echo, 404, redirects, redirect modes, final URLs, and abort. |
 | `tests/fixtures/node/` | Curated fixtures ported from the Node.js test suite. |
 | `tests/fixtures/differential/` | The deterministic corpus compared against a real `node` binary. |
+| `tests/fixtures/electron/` | Main/preload/page trio for the desktop bridge, plus disabled- and main-role fixtures. |
 
 ## Guards and helpers
 
@@ -76,6 +78,25 @@ its test expects `error.JavaScriptError` plus `boom` in the captured output.
 
 Network fixtures use a `setTimeout` watchdog that prints `timeout` and calls
 `process.exit(1)` so a hang fails fast instead of waiting for the runtime guard.
+
+## Desktop tests
+
+`tests/zig/electron_test.zig` covers the headless parts of `--desktop` by
+default: `electron` is rejected outside desktop mode, the main role exposes only
+the main-process surface, and the CLI rejects `--desktop` without a script or
+with `--eval`.
+
+The native-window round trip is opt-in because it opens a visible WKWebView and
+requires a logged-in macOS session:
+
+```sh
+JSZ_DESKTOP_TESTS=1 mise run test
+```
+
+The fixture (`tests/fixtures/electron/main.mjs`) creates a window, loads
+`index.html` through a preload, performs an `ipcRenderer.invoke`/`ipcMain.handle`
+round trip, prints `desktop=ok:hello:true`, and quits. A 20-second watchdog
+exits non-zero if the bridge stalls.
 
 ## Differential tests
 

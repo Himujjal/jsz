@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>jsz desktop example</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      display: grid;
+      place-items: center;
+      min-height: 100vh;
+      background: #f6f6f4;
+      color: #1d1d1b;
+    }
+    main {
+      width: min(32rem, 90vw);
+    }
+    h1 {
+      font-size: 1.25rem;
+      margin-block: 0 0.75rem;
+    }
+    button {
+      font: inherit;
+      padding: 0.5rem 0.9rem;
+      border-radius: 0.4rem;
+      border: 1px solid #1d1d1b;
+      background: #1d1d1b;
+      color: #fff;
+      cursor: pointer;
+    }
+    output {
+      display: block;
+      margin-top: 1rem;
+      padding: 0.75rem;
+      border-radius: 0.4rem;
+      background: #fff;
+      border: 1px solid #ddd;
+      word-break: break-all;
+      font-family: ui-monospace, monospace;
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>jsz desktop example</h1>
+    <button id="pick">Pick a file</button>
+    <output id="result">No file selected.</output>
+  </main>
+  <script>
+    document.querySelector('#pick').addEventListener('click', async () => {
+      const result = document.querySelector('#result');
+      try {
+        const { canceled, filePaths } = await window.desktop.pickFile();
+        result.textContent = canceled ? 'Canceled.' : filePaths[0];
+      } catch (err) {
+        result.textContent = 'Error: ' + (err && err.message);
+      }
+    });
+  </script>
+</body>
+</html>

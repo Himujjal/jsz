@@ -11,6 +11,7 @@ const net_native = @import("js/net.zig");
 const http_native = @import("js/http.zig");
 const fetch_native = @import("js/fetch.zig");
 const pkcs12_native = @import("js/pkcs12.zig");
+const electron_native = @import("js/electron.zig");
 
 pub const max_module_bytes = 16 * 1024 * 1024;
 
@@ -47,6 +48,12 @@ pub const builtin_list = [_]Builtin{
     .{ .name = "node:http", .source = @embedFile("builtins/http.js") },
     .{ .name = "node:_pkcs12", .source = "", .native = true },
     .{ .name = "node:https", .source = @embedFile("builtins/https.js") },
+    // `electron` is role-specific: the source is selected in `load` from
+    // `electron_main.js` or `electron_preload.js`. The empty entry only marks
+    // the canonical name as an embedded builtin.
+    .{ .name = "electron", .source = "" },
+    .{ .name = "node:_electron_main", .source = "", .native = true },
+    .{ .name = "node:_electron_preload", .source = "", .native = true },
 };
 
 const probing_suffixes = [_][]const u8{ "", ".js", ".mjs", "/index.js", "/index.mjs" };
@@ -77,6 +84,7 @@ pub const ErrorCode = enum {
     unknown_builtin,
     invalid_specifier,
     unsupported_scheme,
+    desktop_not_enabled,
 
     pub fn text(self: ErrorCode) []const u8 {
         return switch (self) {
@@ -84,6 +92,7 @@ pub const ErrorCode = enum {
             .unknown_builtin => "ERR_UNKNOWN_BUILTIN_MODULE",
             .invalid_specifier => "ERR_INVALID_MODULE_SPECIFIER",
             .unsupported_scheme => "ERR_UNSUPPORTED_ESM_URL_SCHEME",
+            .desktop_not_enabled => "ERR_DESKTOP_NOT_ENABLED",
         };
     }
 };
@@ -151,6 +160,33 @@ pub fn normalize(
             return null;
         }
         return toJsCString(ctx, spec);
+    }
+
+    // The canonical desktop module is not an npm package and has no `node:`
+    // alias. In ordinary jsz mode it must fail at module load, never trigger
+    // hidden GUI initialization.
+    if (std.mem.eql(u8, spec, "electron")) {
+        if (host.desktop == null) {
+            fail(
+                ctx,
+                allocator,
+                .desktop_not_enabled,
+                "The 'electron' module is available only in --desktop mode",
+                .{},
+            );
+            return null;
+        }
+        if (host.role != .main and host.role != .preload) {
+            fail(
+                ctx,
+                allocator,
+                .desktop_not_enabled,
+                "The 'electron' module is not available to this context",
+                .{},
+            );
+            return null;
+        }
+        return toJsCString(ctx, "electron");
     }
 
     if (isBare(spec)) {
@@ -324,6 +360,28 @@ pub fn load(host_opt: ?*Host, ctx: *quickjs.Context, name: [:0]const u8) ?*quick
         return null;
     };
 
+    if (std.mem.eql(u8, name, "electron")) {
+        const source = switch (host.role) {
+            .main => @embedFile("builtins/electron_main.js"),
+            .preload => @embedFile("builtins/electron_preload.js"),
+            else => {
+                fail(ctx, host.allocator, .desktop_not_enabled, "The 'electron' module is not available to this context", .{});
+                return null;
+            },
+        };
+        return compile(host, ctx, source, "electron");
+    }
+
+    // Preload runs in a restricted QuickJS context. Only the bridge module is
+    // exposed; ordinary `node:*` modules stay unavailable there.
+    if (host.role == .preload and
+        !std.mem.eql(u8, name, "node:_electron_preload") and
+        !std.mem.eql(u8, name, "node:events"))
+    {
+        fail(ctx, host.allocator, .unknown_builtin, "No such built-in module: {s}", .{name});
+        return null;
+    }
+
     if (findBuiltin(name)) |builtin| {
         if (builtin.native) return loadNative(ctx, builtin.name);
         return compile(host, ctx, builtin.source, builtin.name);
@@ -356,6 +414,10 @@ fn loadNative(ctx: *quickjs.Context, name: []const u8) ?*quickjs.ModuleDef {
         fetch_native.initModule(ctx)
     else if (std.mem.eql(u8, name, "node:_pkcs12"))
         pkcs12_native.initModule(ctx)
+    else if (std.mem.eql(u8, name, "node:_electron_main"))
+        electron_native.initMainModule(ctx)
+    else if (std.mem.eql(u8, name, "node:_electron_preload"))
+        electron_native.initPreloadModule(ctx)
     else
         null;
 
@@ -430,7 +492,7 @@ pub fn setImportMeta(
     is_main: bool,
 ) void {
     const allocator = host.allocator;
-    const url = if (std.mem.startsWith(u8, name, "node:"))
+    const url = if (std.mem.startsWith(u8, name, "node:") or std.mem.eql(u8, name, "electron"))
         allocator.dupe(u8, name) catch return
     else
         std.mem.concat(allocator, u8, &.{ "file://", name }) catch return;
@@ -457,6 +519,8 @@ test "normalize maps bare specifiers to node: names" {
     var host: Host = undefined;
     host.allocator = std.testing.allocator;
     host.ctx = ctx;
+    host.role = .script;
+    host.desktop = null;
     host.entry = null;
 
     const name = normalize(&host, ctx, "", "path") orelse return error.NormalizeFailed;
@@ -473,6 +537,8 @@ test "unknown builtin throws instead of resolving" {
     var host: Host = undefined;
     host.allocator = std.testing.allocator;
     host.ctx = ctx;
+    host.role = .script;
+    host.desktop = null;
     host.entry = null;
 
     const ok = std.testing.expect(normalize(&host, ctx, "", "node:not_a_builtin") == null);
@@ -490,6 +556,8 @@ test "embedded path module exposes node-compatible exports" {
     var host: Host = undefined;
     host.allocator = std.testing.allocator;
     host.ctx = ctx;
+    host.role = .script;
+    host.desktop = null;
     host.entry = null;
 
     rt.setModuleLoaderFunc(Host, &host, normalize, load);

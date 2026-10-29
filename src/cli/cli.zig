@@ -8,6 +8,7 @@ const usage =
     \\
     \\Options:
     \\  -e, --eval <code>   Evaluate code
+    \\  --desktop           Run a main-process script with the native desktop backend
     \\  -h, --help          Show this help
     \\  -v, --version       Show version
     \\
@@ -26,6 +27,7 @@ pub fn run(init: std.process.Init) !u8 {
 
     var script: ?[]const u8 = null;
     var eval_source: ?[]const u8 = null;
+    var desktop_mode = false;
     var script_args: std.ArrayList([]const u8) = .empty;
     defer script_args.deinit(init.gpa);
 
@@ -46,8 +48,16 @@ pub fn run(init: std.process.Init) !u8 {
             eval_source = args.next() orelse return error.MissingEvalSource;
             continue;
         }
+        if (std.mem.eql(u8, arg, "--desktop")) {
+            desktop_mode = true;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "repl")) continue;
         script = arg;
+    }
+
+    if (desktop_mode and (eval_source != null or script == null)) {
+        return error.DesktopRequiresScript;
     }
 
     // Outlives the runtime: the host borrows this slice.
@@ -70,6 +80,7 @@ pub fn run(init: std.process.Init) !u8 {
         .writer = &stdout.interface,
         .argv = argv.items,
         .environ_map = init.environ_map,
+        .desktop = desktop_mode,
     });
     defer runtime.deinit();
 

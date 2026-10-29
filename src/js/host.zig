@@ -8,6 +8,13 @@ const Net = @import("../net.zig").Net;
 const Http = @import("../http.zig").Http;
 const Fetch = @import("../fetch.zig").Fetch;
 
+pub const Role = enum {
+    script,
+    main,
+    preload,
+    renderer,
+};
+
 pub const Host = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -20,6 +27,13 @@ pub const Host = struct {
     net: *Net,
     http: *Http,
     fetch: *Fetch,
+    /// Which QuickJS context owns this host. `electron` resolves differently
+    /// per role, and preload sees only its audited module allowlist.
+    role: Role = .script,
+    /// Opaque `*desktop.Desktop`; null outside `--desktop`.
+    desktop: ?*anyopaque = null,
+    /// Logical desktop window owning this context; 0 in the main/script role.
+    window_id: u32 = 0,
     /// Borrowed process arguments; owned by the caller that outlives the runtime.
     argv: []const []const u8,
     environ: *std.process.Environ.Map,
@@ -29,6 +43,10 @@ pub const Host = struct {
     cwd: []const u8 = "",
     /// Set when `cwd` is a host-owned copy; the runtime keeps no second copy.
     cwd_owned: ?[]u8 = null,
+
+    pub fn desktopEnabled(self: *Host) bool {
+        return self.desktop != null;
+    }
 
     /// Replaces `cwd` with a host-owned copy of `path`.
     pub fn setCwd(self: *Host, path: []const u8) void {

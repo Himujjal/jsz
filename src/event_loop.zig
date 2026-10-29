@@ -3,6 +3,22 @@ const quickjs = @import("quickjs");
 const zio = @import("zio");
 const jobs = @import("jobs.zig");
 
+/// The desktop backend exposes only a pump and an activity check; the event
+/// loop must not know about WebUI or QuickJS contexts other than its own.
+pub const DesktopPump = struct {
+    context: *anyopaque,
+    pump_fn: *const fn (*anyopaque) void,
+    active_fn: *const fn (*anyopaque) bool,
+
+    pub fn pump(self: DesktopPump) void {
+        self.pump_fn(self.context);
+    }
+
+    pub fn active(self: DesktopPump) bool {
+        return self.active_fn(self.context);
+    }
+};
+
 const UnhandledRejection = struct {
     promise: quickjs.Value,
     reason: quickjs.Value,
@@ -100,6 +116,9 @@ pub const EventLoop = struct {
     /// Rejected promises that had no handler when the job queue drained.
     rejections: std.ArrayList(UnhandledRejection) = .empty,
     exit_hooks_ran: bool = false,
+    /// Opt-in GUI pump. Kept as a vtable so this module does not import the
+    /// desktop backend (which imports this one).
+    desktop: ?DesktopPump = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -362,6 +381,7 @@ pub const EventLoop = struct {
             try self.checkLimits();
             self.handleSignals();
             if (self.stopped) break;
+            if (self.desktop) |desktop| desktop.pump();
             self.drainJobs() catch |err| {
                 self.failed = true;
                 return err;
@@ -379,25 +399,28 @@ pub const EventLoop = struct {
 
             const deadline = self.nextDeadline();
             const queue_pending = if (self.queue) |queue| queue.hasWork() else false;
-            if (deadline == null and !queue_pending and self.ref_count == 0) break;
+            const desktop_active = if (self.desktop) |desktop| desktop.active() else false;
+            if (deadline == null and !queue_pending and self.ref_count == 0 and !desktop_active) break;
 
             const current = now();
+            const gui_wait = if (desktop_active) desktopTickNs() else null;
             if (deadline) |next| {
                 if (next > current) {
-                    if (queue_pending) {
-                        self.queue.?.wait(next - current);
+                    const wait_ns = if (gui_wait) |gui_deadline| @min(next - current, gui_deadline) else next - current;
+                    if (queue_pending or desktop_active) {
+                        self.queue.?.wait(wait_ns);
                     } else if (self.signalsWatched()) {
                         // The queue is the only wait a zio signal task can wake.
-                        self.waitForWake(next - current);
+                        self.waitForWake(wait_ns);
                     } else {
-                        zio.sleep(.fromNanoseconds(next - current)) catch |err| {
+                        zio.sleep(.fromNanoseconds(wait_ns)) catch |err| {
                             self.failed = true;
                             return err;
                         };
                     }
                 }
-            } else if (queue_pending) {
-                self.queue.?.wait(null);
+            } else if (queue_pending or desktop_active) {
+                self.queue.?.wait(gui_wait);
             } else {
                 // No timer and no queued work, but live handles: hang on the
                 // queue instead of spinning.
@@ -405,6 +428,7 @@ pub const EventLoop = struct {
                 queue.wait(null);
             }
 
+            if (self.desktop) |desktop| desktop.pump();
             self.dispatchQueue();
             self.drainJobs() catch |err| {
                 self.failed = true;
@@ -731,6 +755,12 @@ fn sameReason(ctx: *quickjs.Context, a: quickjs.Value, b: quickjs.Value) bool {
 
 fn now() u64 {
     return zio.now().toNanoseconds();
+}
+
+/// GUI pump cadence while a native window is open. WebUI's `waitAsync` pumps
+/// the OS event loop; a bounded wait keeps input responsive without a busy spin.
+fn desktopTickNs() u64 {
+    return 8 * std.time.ns_per_ms;
 }
 
 /// Node clamps delays at 2^31-1 ms. Annotate the clamp as `u64`: `@min` with a
