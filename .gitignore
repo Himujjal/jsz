@@ -1,6 +1,7 @@
 .zig-cache/
 zig-out/
 zig-pkg/
+dist/
 *.o
 *.a
 .DS_Store

@@ -41,7 +41,7 @@ fn run(init: std.process.Init) !u8 {
     var out_buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &out_buffer);
 
-    var args = std.process.Args.Iterator.init(init.minimal.args);
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args.deinit();
     _ = args.next();
 

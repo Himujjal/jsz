@@ -3,11 +3,19 @@ const std = @import("std");
 pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    // Zig does not discover the macOS SDK for a non-native Apple target.
+    // Forward an explicit SDK so WebUI can find Cocoa and WebKit when
+    // cross-compiling Intel and Apple Silicon macOS binaries.
+    const macos_sdk = b.option([]const u8, "macos-sdk", "Absolute path to a macOS SDK for cross-compilation");
 
     const quickjs = b.dependency("quickjs", .{ .target = target, .optimize = optimize });
     const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
     const dusty = b.dependency("dusty", .{ .target = target, .optimize = optimize });
-    const webui = b.dependency("zig_webui", .{ .target = target, .optimize = optimize });
+    const webui = b.dependency("zig_webui", .{
+        .target = target,
+        .optimize = optimize,
+        .macos_sdk = macos_sdk,
+    });
     const dusty_mod = dusty.module("dusty");
     // Dusty's default zio import is a stub; the runtime uses the real one.
     dusty_mod.addImport("zio", zio.module("zio"));

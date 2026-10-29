@@ -1,6 +1,6 @@
 .{
     .name = .jsz,
-    .version = "0.0.1",
+    .version = "0.1.0",
     .dependencies = .{
         // `upgrade/quickjsng-v0.17.0`: bundles QuickJS-ng 0.17.0, which marks
         // the internal module-evaluation promise handled after a top-level

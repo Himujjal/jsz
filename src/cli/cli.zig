@@ -29,7 +29,7 @@ pub fn run(init: std.process.Init) !u8 {
         return runSea(init, &payload, &stdout.interface);
     }
 
-    var args = std.process.Args.Iterator.init(init.minimal.args);
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args.deinit();
     const argv0 = args.next() orelse "jsz";
 
@@ -115,7 +115,7 @@ fn runSea(
     const exe = try std.process.executablePathAlloc(init.io, init.gpa);
     defer init.gpa.free(exe);
 
-    var args = std.process.Args.Iterator.init(init.minimal.args);
+    var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args.deinit();
     const invocation = args.next() orelse exe;
 

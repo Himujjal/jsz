@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const quickjs = @import("quickjs");
 const Host = @import("host.zig").Host;
 const fs = @import("../fs.zig");
@@ -178,12 +179,22 @@ fn throwInvalidArgValue(
     return error_value.throw(ctx);
 }
 
-fn argFd(ctx: *quickjs.Context, args: []const quickjs.c.JSValue, index: usize) i32 {
+fn argFd(ctx: *quickjs.Context, args: []const quickjs.c.JSValue, index: usize) ?std.Io.File.Handle {
     const value = argValue(args, index);
-    if (!value.isNumber()) return -1;
-    const number = value.toFloat64(ctx) catch return -1;
-    const fd = floatToInt(i32, number) orelse return -1;
-    if (fd < 0) return -1;
+    if (!value.isNumber()) return null;
+    const number = value.toFloat64(ctx) catch return null;
+    if (builtin.os.tag == .windows) {
+        if (number < 0) return null;
+        const raw = floatToInt(usize, number) orelse return null;
+        return switch (raw) {
+            0 => std.Io.File.stdin().handle,
+            1 => std.Io.File.stdout().handle,
+            2 => std.Io.File.stderr().handle,
+            else => @ptrFromInt(raw),
+        };
+    }
+    const fd = floatToInt(i32, number) orelse return null;
+    if (fd < 0) return null;
     return fd;
 }
 

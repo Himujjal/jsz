@@ -363,7 +363,7 @@ fn executeChild(
         .uid = if (options.uid) |value| @intCast(value) else null,
         .gid = if (options.gid) |value| @intCast(value) else null,
         .create_no_window = options.windows_hide,
-        .pgid = if (options.detached) 0 else null,
+        .pgid = if (builtin.os.tag == .windows) null else if (options.detached) 0 else null,
     }) catch |spawn_err| {
         outcome.failure = try core.launchFailure(allocator, command, spawn_err);
         return outcome;

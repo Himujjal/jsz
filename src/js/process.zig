@@ -265,10 +265,25 @@ fn clearUncaughtHook(ctx_opt: ?*quickjs.Context, _: Value, _: []const quickjs.c.
 }
 
 fn pid(_: ?*quickjs.Context, _: Value, _: []const quickjs.c.JSValue) Value {
+    if (builtin.os.tag == .windows) {
+        return Value.initUint32(std.os.windows.GetCurrentProcessId());
+    }
     return Value.initInt32(std.c.getpid());
 }
 
 fn ppid(_: ?*quickjs.Context, _: Value, _: []const quickjs.c.JSValue) Value {
+    if (builtin.os.tag == .windows) {
+        var info: std.os.windows.PROCESS.BASIC_INFORMATION = undefined;
+        const status = std.os.windows.ntdll.NtQueryInformationProcess(
+            std.os.windows.GetCurrentProcess(),
+            .BasicInformation,
+            &info,
+            @sizeOf(std.os.windows.PROCESS.BASIC_INFORMATION),
+            null,
+        );
+        if (status != .SUCCESS) return Value.initInt32(0);
+        return Value.initUint32(@truncate(info.InheritedFromUniqueProcessId));
+    }
     return Value.initInt32(std.c.getppid());
 }
 

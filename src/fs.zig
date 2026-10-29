@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const quickjs = @import("quickjs");
 const zio = @import("zio");
 const jobs = @import("jobs.zig");
@@ -141,7 +142,7 @@ pub const Outcome = union(enum) {
     stat: StatData,
     entries: []EntryData,
     path: [:0]u8,
-    fd: i32,
+    fd: std.Io.File.Handle,
     count: u64,
 };
 
@@ -166,8 +167,8 @@ pub const Job = struct {
     gid: u32 = 0,
     atime_ms: f64 = 0,
     mtime_ms: f64 = 0,
-    /// Descriptor operations; `-1` means no descriptor was supplied.
-    fd: i32 = -1,
+    /// Descriptor operations; `null` means no descriptor was supplied.
+    fd: ?std.Io.File.Handle = null,
     /// `-1` reads/writes at the descriptor's current offset.
     position: i64 = -1,
     append: bool = false,
@@ -447,14 +448,14 @@ pub const Fs = struct {
                 return .{ .fd = file.handle };
             },
             .close => {
-                if (job.fd < 0) return error.BadFileDescriptor;
+                const fd = job.fd orelse return error.BadFileDescriptor;
                 // `File.close` reports nothing, so a stale descriptor is only
                 // observable through the guarded JS wrapper.
-                wrapFd(job.fd).close(self.io);
+                wrapFd(fd).close(self.io);
                 return .none;
             },
             .read_fd => {
-                if (job.fd < 0) return error.BadFileDescriptor;
+                const fd = job.fd orelse return error.BadFileDescriptor;
                 if (job.length > max_read_bytes) return error.FileTooBig;
 
                 const length: usize = @intCast(job.length);
@@ -462,7 +463,7 @@ pub const Fs = struct {
                 errdefer self.allocator.free(buffer);
                 if (length == 0) return .{ .bytes = buffer };
 
-                const file = wrapFd(job.fd);
+                const file = wrapFd(fd);
                 const count = if (job.position >= 0)
                     try file.readPositional(self.io, &.{buffer}, @intCast(job.position))
                 else
@@ -479,10 +480,10 @@ pub const Fs = struct {
                 return .{ .bytes = short };
             },
             .write_fd => {
-                if (job.fd < 0) return error.BadFileDescriptor;
+                const fd = job.fd orelse return error.BadFileDescriptor;
                 if (job.data.len == 0) return .{ .count = 0 };
 
-                const file = wrapFd(job.fd);
+                const file = wrapFd(fd);
                 const count = if (job.append) blk: {
                     // Appending without O_APPEND: write at the current end of
                     // the file. The runtime is single-threaded, so a stat per
@@ -500,8 +501,8 @@ pub const Fs = struct {
                 return .{ .count = count };
             },
             .fsync => {
-                if (job.fd < 0) return error.BadFileDescriptor;
-                const file = wrapFd(job.fd);
+                const fd = job.fd orelse return error.BadFileDescriptor;
+                const file = wrapFd(fd);
                 // zio logs undocumented errnos for fsync/ftruncate, so check the
                 // descriptor first and report a clean EBADF instead.
                 try checkFd(file, self.io);
@@ -512,16 +513,16 @@ pub const Fs = struct {
                 return .none;
             },
             .fstat => {
-                if (job.fd < 0) return error.BadFileDescriptor;
-                const stat = wrapFd(job.fd).stat(self.io) catch |err| switch (err) {
+                const fd = job.fd orelse return error.BadFileDescriptor;
+                const stat = wrapFd(fd).stat(self.io) catch |err| switch (err) {
                     error.Unexpected => return error.BadFileDescriptor,
                     else => return err,
                 };
                 return .{ .stat = statData(stat) };
             },
             .ftruncate => {
-                if (job.fd < 0) return error.BadFileDescriptor;
-                const file = wrapFd(job.fd);
+                const fd = job.fd orelse return error.BadFileDescriptor;
+                const file = wrapFd(fd);
                 try checkFd(file, self.io);
                 file.setLength(self.io, job.length) catch |err| switch (err) {
                     error.Unexpected => return error.BadFileDescriptor,
@@ -538,6 +539,15 @@ pub const Fs = struct {
 /// descriptor stays owned by the JS wrapper.
 fn wrapFd(fd: std.Io.File.Handle) std.Io.File {
     return .{ .handle = fd, .flags = .{ .nonblocking = false } };
+}
+
+/// Windows handles are pointer-sized; JS numbers are the only descriptor
+/// representation shared with the native fs surface, so encode the pointer.
+fn fdValue(fd: std.Io.File.Handle) quickjs.Value {
+    return switch (builtin.os.tag) {
+        .windows => quickjs.Value.initInt64(@intCast(@intFromPtr(fd))),
+        else => quickjs.Value.initInt32(fd),
+    };
 }
 
 /// `stat` is the cheapest zio call that reports a closed descriptor as
@@ -653,7 +663,7 @@ fn toValue(ctx: *quickjs.Context, job: *Job) !quickjs.Value {
         .path => |path| quickjs.Value.initStringLen(ctx, path),
         .stat => |stat| statValue(ctx, stat),
         .entries => |entries| entriesValue(ctx, entries),
-        .fd => |fd| quickjs.Value.initInt32(fd),
+        .fd => |fd| fdValue(fd),
         .count => |count| quickjs.Value.initFloat64(@floatFromInt(count)),
     };
 }
