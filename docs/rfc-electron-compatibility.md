@@ -6,6 +6,13 @@ window backend, and the bridge described below. The gates and limitations in
 this document still apply: this is not Electron, not Chromium, and not a
 security boundary equivalent to Electron's process model.
 
+Packaging follow-up (2026-10-29): compiled desktop apps are now supported
+through `jszc` and the `sea.json` `assets`/`desktop` keys. Preload and HTML are
+embedded and resolved from the payload; see
+[docs/single-executable.md](single-executable.md). This supersedes the
+packaging proposal below for v1, but not the signing, notarization, installer,
+or auto-update work.
+
 ## Summary and compatibility claim
 
 Offer a first-class `electron` builtin to **a documented subset** of Electron applications, not an Electron runtime or a drop-in replacement. The first deliverable is a main-process jsz application controlling native WebView windows through zig-webui, with an explicit preload capability bridge to ordinary browser JavaScript. Chromium, V8, Node's complete API, Electron's multi-process architecture, and Electron's full security guarantees are **not** included. An external-browser backend is a possible explicit fallback, never a silent substitute for `BrowserWindow`. No percentage of real-world Electron usage is asserted: coverage requires a reproducible application corpus and measured API-call inventory before any percentage claim.

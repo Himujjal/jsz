@@ -1,0 +1,9 @@
+{
+  "main": "main.mjs",
+  "output": "desktop-example",
+  "desktop": true,
+  "assets": {
+    "preload.mjs": "preload.mjs",
+    "index.html": "index.html"
+  }
+}

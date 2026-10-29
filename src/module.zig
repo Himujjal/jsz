@@ -12,6 +12,7 @@ const http_native = @import("js/http.zig");
 const fetch_native = @import("js/fetch.zig");
 const pkcs12_native = @import("js/pkcs12.zig");
 const electron_native = @import("js/electron.zig");
+const sea_native = @import("js/sea.zig");
 
 pub const max_module_bytes = 16 * 1024 * 1024;
 
@@ -48,6 +49,10 @@ pub const builtin_list = [_]Builtin{
     .{ .name = "node:http", .source = @embedFile("builtins/http.js") },
     .{ .name = "node:_pkcs12", .source = "", .native = true },
     .{ .name = "node:https", .source = @embedFile("builtins/https.js") },
+    // `node:sea` is available everywhere; it reports `false` outside a
+    // single-executable binary and throws on asset access.
+    .{ .name = "node:_sea", .source = "", .native = true },
+    .{ .name = "node:sea", .source = @embedFile("builtins/sea.js") },
     // `electron` is role-specific: the source is selected in `load` from
     // `electron_main.js` or `electron_preload.js`. The empty entry only marks
     // the canonical name as an embedded builtin.
@@ -418,6 +423,8 @@ fn loadNative(ctx: *quickjs.Context, name: []const u8) ?*quickjs.ModuleDef {
         electron_native.initMainModule(ctx)
     else if (std.mem.eql(u8, name, "node:_electron_preload"))
         electron_native.initPreloadModule(ctx)
+    else if (std.mem.eql(u8, name, "node:_sea"))
+        sea_native.initModule(ctx)
     else
         null;
 

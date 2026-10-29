@@ -7,6 +7,7 @@ const ChildProcesses = @import("../child_process.zig").ChildProcesses;
 const Net = @import("../net.zig").Net;
 const Http = @import("../http.zig").Http;
 const Fetch = @import("../fetch.zig").Fetch;
+const sea = @import("../sea.zig");
 
 pub const Role = enum {
     script,
@@ -37,6 +38,10 @@ pub const Host = struct {
     /// Borrowed process arguments; owned by the caller that outlives the runtime.
     argv: []const []const u8,
     environ: *std.process.Environ.Map,
+    /// Assets embedded by `jszc`; empty outside a single-executable binary.
+    assets: []const sea.Asset = &.{},
+    /// True when running from a `jszc` payload.
+    is_sea: bool = false,
     /// Canonical name of the entry module (absolute path) or null for evals.
     entry: ?[]const u8 = null,
     /// Absolute current working directory; empty until `refreshCwd` succeeds.

@@ -1,13 +1,16 @@
 # Architecture
 
-> **Note (2026-10-28):** phases 0-5 add the ESM loader, async filesystem,
-> process/os/crypto, child processes, TCP `net`, a dusty-backed HTTP/HTTPS
-> server and client, and `fetch`. Server responses and client response bodies
-> stream; request bodies and `fetch` bodies stay buffered. QuickJS still runs on
-> the single JS task; file, child, network, and fetch work runs in zio tasks and
-> completes through the queue described below. The core event-loop and host
-> sections remain accurate; see [the plan](plan/plan.md) for the per-module
-> layering.
+> **Reading guide:** Start with [CLI](cli.md) for invocation and
+> [single-executable apps](single-executable.md) for packaging. This page
+> explains the runtime's ownership and event loop, then the HTTP transport.
+> The [compatibility plan](plan/plan.md) is a historical design record, not a
+> current feature list; see [roadmap](roadmap.md) for limitations.
+>
+> The ESM loader, async filesystem, process/os/crypto, child processes, TCP
+> `net`, HTTP/HTTPS, and `fetch` extend the core diagram below. Server responses
+> and client response bodies stream; server request bodies and `fetch` bodies
+> remain buffered. QuickJS runs on the JS task; I/O work completes from zio
+> tasks via the host queue.
 
 jsz is a single-process, single-threaded JavaScript runtime. Zig owns the process and the event loop, QuickJS executes JavaScript, and zio provides the runtime clock, timers, and I/O. Every QuickJS call happens on the JS task; there is no cross-thread JavaScript access.
 
@@ -72,8 +75,11 @@ Arrows show calls and ownership. QuickJS invokes the installed C callbacks; each
 - `src/event_loop.zig` schedules timers, drains QuickJS jobs, and enforces run limits.
 - `src/js/builtins.zig` installs the native `setTimeout`, `clearTimeout`, `setInterval`, `clearInterval`, `sleep`, `console.log`, and `console.error` before the embedded `bootstrap.js` module installs the Node-shaped globals (`console`, `performance`, `global`, `process`, `Buffer`, `URL`, `fetch`, and friends).
 - `src/js/host.zig` defines the `Host` struct: allocator, QuickJS context, event loop pointer, and output buffer pointer. A `*Host` is stored in the QuickJS context opaque pointer, so C callbacks can reach runtime state without circular imports.
+- `src/desktop.zig` owns the WebUI window registry, per-window preload contexts, the JSON bridge queue, native dialogs, and the embedded-asset store used by desktop payloads.
+- `src/sea.zig` defines the single-executable payload and footer, reads and verifies the trailing payload at startup, and extracts embedded assets for WebUI.
+- `src/jszc.zig` is the build tool that copies the `jsz` binary and appends a payload containing the script, assets, and mode flags.
 
-The public operations on an initialized runtime are `eval`, `evalFile`, `run`, `tick`, `flush`, `appendValue`, `context`, and `deinit`. `appendValue` converts a value with JavaScript `toString` and appends it plus a newline to the output buffer. `Options` accepts `max_runtime_ms`, `max_iterations`, and an optional `writer`.
+The public operations on an initialized runtime are `eval`, `evalDetected`, `evalFile`, `evalEntrySource`, `run`, `tick`, `flush`, `appendValue`, `context`, and `deinit`. `appendValue` converts a value with JavaScript `toString` and appends it plus a newline to the output buffer. `Options` accepts `max_runtime_ms`, `max_iterations`, `writer`, `argv`, `environ_map`, `desktop`, `assets`, and `is_sea`.
 
 The shared stdout writer is required because each `std.Io.File.stdout()` writer starts at offset 0. Creating a new writer per message would overwrite earlier output. One writer per process preserves ordering.
 
@@ -85,12 +91,36 @@ The shared stdout writer is required because each `std.Io.File.stdout()` writer 
 - `src/js/promises.zig` creates a QuickJS promise capability and schedules its resolve and reject functions with the event loop.
 - `src/js/console.zig` is the native writer: it formats each argument with JavaScript `toString`, separates arguments with a space, and appends a newline to the runtime output buffer. `console.error` uses the same write path as `console.log`. `src/builtins/console.js` wraps those writers, formats through `util.format`, and adds `info`/`warn`/`debug`/`trace`/`dir`/`assert`/`time`/`timeEnd`; it replaces the global during bootstrap.
 
+## Single executable apps
+
+`jszc` is a separate executable defined in `build.zig`. It embeds the freshly
+built `jsz` binary through a generated `@embedFile` module (the runtime is
+copied next to `runtime_embed.zig` in the build cache), reads the entry script
+and optional `assets`, and writes `jsz bytes || payload || trailer`.
+
+At startup `cli.run` calls `sea.readSelf` before argument parsing. It resolves
+its own executable path, reads the last 64 bytes, validates the footer magic,
+version, and payload length, then verifies the payload's SHA-256 before
+evaluation. When a payload is present:
+
+1. `process.argv` becomes `[absolute executable, invocation string, ...args]`.
+2. The desktop flag from the payload sets `Runtime.Options.desktop`.
+3. Embedded assets are attached to `Host.assets`.
+4. `Runtime.evalEntrySource` evaluates the source with the executable path as
+   `import.meta.url` and the recorded source name for module/script detection.
+
+`sea.Store` resolves desktop preload and HTML paths against asset keys (exact,
+`./`-stripped, or a component-boundary suffix such as `/app/preload.mjs`), then
+extracts all assets to `TMPDIR/jsz-sea-<random>` so WebUI can serve relative
+subresources. `Desktop.deinit` removes that directory. `node:sea` reads asset
+bytes directly without extraction.
+
 ## Lifecycle
 
 ### Initialization
 
 1. `main(init: std.process.Init)` calls `cli.run(init)`.
-2. `cli.run` creates a stdout writer with a 4 KiB buffer and parses the command line.
+2. `cli.run` creates a stdout writer with a 4 KiB buffer. It first checks its own executable for a single-executable payload; when present it runs the embedded entry and skips normal argument parsing. Otherwise it parses the command line.
 3. `jsz.Runtime.init(init.gpa, .{ .writer = &stdout.interface })` allocates the runtime and initializes, in order, the zio Runtime, QuickJS Runtime, QuickJS Context, and EventLoop.
 4. The runtime points `loop.sink` at its output buffer and applies the optional `max_iterations` and `max_runtime_ms` options.
 5. It fills the `Host` struct and stores it with `ctx.setOpaque(Host, &self.host)`.

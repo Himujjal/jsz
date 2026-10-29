@@ -13,6 +13,7 @@ const Host = @import("js/host.zig").Host;
 const builtins = @import("js/builtins.zig");
 const module = @import("module.zig");
 const Desktop = @import("desktop.zig").Desktop;
+const sea = @import("sea.zig");
 
 pub const Options = struct {
     max_runtime_ms: ?u64 = null,
@@ -23,6 +24,10 @@ pub const Options = struct {
     environ_map: ?*std.process.Environ.Map = null,
     /// Enables the `electron` builtin and the native WebUI backend.
     desktop: bool = false,
+    /// Assets embedded by `jszc`, borrowed from the payload.
+    assets: []const sea.Asset = &.{},
+    /// True when running from a `jszc` payload.
+    is_sea: bool = false,
 };
 
 pub const Runtime = struct {
@@ -110,6 +115,8 @@ pub const Runtime = struct {
             .fetch = &self.fetch,
             .argv = options.argv orelse &.{},
             .environ = options.environ_map orelse &self.env_owned.?,
+            .assets = options.assets,
+            .is_sea = options.is_sea,
         };
         if (options.desktop) self.host.role = .main;
         ctx.setOpaque(Host, &self.host);
@@ -242,6 +249,29 @@ pub const Runtime = struct {
         defer self.allocator.free(filename);
 
         return self.evalTerminated(source, filename, isModulePath(entry, source));
+    }
+
+    /// Evaluates an embedded payload as the entry module at `entry` (an
+    /// absolute executable path). `source_name` supplies the original
+    /// extension, because an executable path cannot signal `.mjs` or `.cjs`.
+    pub fn evalEntrySource(
+        self: *Runtime,
+        source: []const u8,
+        entry: []const u8,
+        source_name: []const u8,
+    ) !quickjs.Value {
+        const owned = try self.allocator.dupe(u8, entry);
+        if (self.entry_owned) |previous| self.allocator.free(previous);
+        self.entry_owned = owned;
+        self.host.entry = owned;
+
+        const terminated = try self.allocator.dupeSentinel(u8, source, 0);
+        defer self.allocator.free(terminated);
+
+        const filename = try self.allocator.dupeSentinel(u8, entry, 0);
+        defer self.allocator.free(filename);
+
+        return self.evalTerminated(terminated, filename, isModulePath(source_name, source));
     }
 
     /// `.mjs` is always a module, `.cjs` is always a script, and `.js` is

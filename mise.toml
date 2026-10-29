@@ -67,7 +67,7 @@ run = [
 
 [tasks.doc]
 description = "List documentation entry points"
-run = "printf 'README.md\\ndocs/architecture.md\\ndocs/cli.md\\ndocs/testing.md\\ndocs/roadmap.md\\n'"
+run = "printf 'README.md\\ndocs/architecture.md\\ndocs/cli.md\\ndocs/testing.md\\ndocs/roadmap.md\\ndocs/single-executable.md\\n'"
 
 [tasks.install-hooks]
 description = "Install hk git hooks"

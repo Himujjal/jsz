@@ -1,5 +1,11 @@
 # Testing
 
+For a first pass, run `mise install` and `mise run test` from the repository
+root. This builds the test dependencies and runs the integration suite;
+`mise run check` also checks formatting and builds both executables. See
+[architecture](architecture.md) for runtime ownership and
+[CLI](cli.md) for manual invocation.
+
 ## Test layers
 
 jsz has two test layers:
@@ -35,6 +41,8 @@ that prints `timeout` and exits non-zero when an operation hangs.
 | `tests/zig/fetch_test.zig` | Global `fetch` against a local `http` server, redirect modes, final URLs, in-flight abort, and the `599 Custom Reason` status line. |
 | `tests/zig/differential_test.zig` | Optional parity check: runs the differential corpus through jsz and a real `node`, then compares stdout byte-for-byte. |
 | `tests/zig/electron_test.zig` | `electron` role gating, main-process exports, CLI validation, and an opt-in native-window IPC round trip. |
+| `tests/zig/sea_test.zig` | `jszc` payload embedding, `argv`/`import.meta`, embedded assets and `node:sea`, desktop payload activation, JSON config, and the input-overwrite guard. |
+| `tests/fixtures/sea/` | Entry script used to prove a compiled executable no longer reads its source. |
 | `tests/fixtures/modules/` | ESM imports, cycles, dynamic import, and resolution errors. |
 | `tests/fixtures/net/` | TCP echo, `ECONNREFUSED`, and live-handle shutdown. |
 | `tests/fixtures/http/` | HTTP server/fetch round trip, `http.request`/`http.get`, server response streaming over raw `net` framing, close draining, and live-listener shutdown. |
@@ -97,6 +105,27 @@ The fixture (`tests/fixtures/electron/main.mjs`) creates a window, loads
 `index.html` through a preload, performs an `ipcRenderer.invoke`/`ipcMain.handle`
 round trip, prints `desktop=ok:hello:true`, and quits. A 20-second watchdog
 exits non-zero if the bridge stalls.
+
+## Single executable tests
+
+`tests/zig/sea_test.zig` invokes the installed `jszc` to compile
+`tests/fixtures/sea/main.mjs` into a temporary executable. It deletes the
+source, runs the executable with arguments, and checks `process.argv`,
+`import.meta.url`, `import.meta.main`, and stdout. Further cases cover
+`--config`, embedded assets and `node:sea`, desktop-mode activation, and the
+guard that refuses an output path equal to the input script.
+
+The full desktop round trip is opt-in because it opens a window. It compiles the
+Electron fixture with its preload and HTML as assets and expects
+`desktop=ok:hello:true`:
+
+```sh
+JSZ_DESKTOP_TESTS=1 mise run test
+```
+
+The tests use `std.testing.tmpDir` and the installed binaries from
+`test_options.jszc_exe`; no extra environment variable is required for the
+headless cases.
 
 ## Differential tests
 
@@ -171,6 +200,7 @@ parsing, and fetch. The exact test count changes as coverage grows;
 | `pkcs12_test.zig` | PFX parse to PEM with PBES2/AES and legacy PBE, malformed input, wrong passphrase. |
 | `fetch_test.zig` | Text, JSON, POST echo, response headers, 404, redirect following, redirect modes, final URLs, in-flight abort, and an arbitrary `599 Custom Reason`. |
 | `differential_test.zig` | Optional `node` parity for the deterministic path/buffer/url/util corpus; skips without `node`. |
+| `sea_test.zig` | `jszc` output runs without its source, argv/import.meta shape, assets and `node:sea`, desktop payloads, JSON config, and overwrite guard. |
 
 ## Adding a test
 

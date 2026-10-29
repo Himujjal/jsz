@@ -119,7 +119,9 @@ class BrowserWindow extends EventEmitter {
     let preload = null;
     if (webPreferences.preload !== undefined) {
       preload = validateString(webPreferences.preload, 'webPreferences.preload');
-      if (!preload.startsWith('/')) throw unsupportedOption('webPreferences.preload must be an absolute path');
+      if (preload.length === 0) {
+        throw invalidArgType('webPreferences.preload', 'non-empty string', preload);
+      }
     }
 
     const id = native.createWindow(width, height, show, resizable, title);

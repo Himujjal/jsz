@@ -31,4 +31,5 @@ test {
     _ = @import("pkcs12_test.zig");
     _ = @import("differential_test.zig");
     _ = @import("electron_test.zig");
+    _ = @import("sea_test.zig");
 }

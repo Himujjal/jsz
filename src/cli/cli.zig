@@ -21,6 +21,14 @@ pub fn run(init: std.process.Init) !u8 {
     var out_buffer: [4096]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &out_buffer);
 
+    // A `jszc` binary carries its entry script in a trailer. It always runs
+    // that script and forwards every argument to it, like a Node SEA
+    // executable, so ordinary `jsz` flags are not interpreted.
+    if (try jsz.sea.readSelf(init.gpa, init.io)) |payload| {
+        defer payload.deinit(init.gpa);
+        return runSea(init, &payload, &stdout.interface);
+    }
+
     var args = std.process.Args.Iterator.init(init.minimal.args);
     defer args.deinit();
     const argv0 = args.next() orelse "jsz";
@@ -94,6 +102,47 @@ pub fn run(init: std.process.Init) !u8 {
     }
     try stdout.interface.flush();
     return code;
+}
+
+/// Runs the embedded entry point. Node SEA normalizes `argv[0]` to the
+/// absolute executable path and keeps the invocation string at `argv[1]`,
+/// which stands in for the missing script path.
+fn runSea(
+    init: std.process.Init,
+    payload: *const jsz.sea.Payload,
+    out: *std.Io.Writer,
+) !u8 {
+    const exe = try std.process.executablePathAlloc(init.io, init.gpa);
+    defer init.gpa.free(exe);
+
+    var args = std.process.Args.Iterator.init(init.minimal.args);
+    defer args.deinit();
+    const invocation = args.next() orelse exe;
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(init.gpa);
+    try argv.append(init.gpa, exe);
+    try argv.append(init.gpa, invocation);
+    while (args.next()) |arg| try argv.append(init.gpa, arg);
+
+    const runtime = try jsz.Runtime.init(init.gpa, .{
+        .writer = out,
+        .argv = argv.items,
+        .environ_map = init.environ_map,
+        .desktop = payload.desktop,
+        .assets = payload.assets,
+        .is_sea = true,
+    });
+    defer runtime.deinit();
+
+    const value = runtime.evalEntrySource(payload.source, exe, payload.name) catch |err| {
+        try runtime.flush();
+        return err;
+    };
+    value.deinit(runtime.context());
+    try runtime.run();
+    try out.flush();
+    return runtime.exitCode();
 }
 
 fn runSource(runtime: *jsz.Runtime, source: []const u8, filename: [:0]const u8) !u8 {

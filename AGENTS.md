@@ -33,7 +33,12 @@ src/root.zig              public module exports
 src/runtime.zig           owns zio runtime, QuickJS runtime/context, event loop
 src/event_loop.zig        timer scheduling, job draining, run guards
 src/cli/cli.zig           argument parsing, script/eval/REPL, shared stdout writer
+src/desktop.zig           WebUI windows, preload contexts, IPC bridge, dialogs
+src/sea.zig               single-executable payload, asset store, self-detection
+src/jszc.zig              compile a script into an executable that embeds jsz
 src/js/host.zig           host state stored in the QuickJS context opaque pointer
+src/js/sea.zig            native node:sea asset access
+src/builtins/sea.js       node:sea facade (isSea, getAsset, getAssetKeys)
 src/js/builtins.zig       installs globals
 src/js/timers.zig         setTimeout/setInterval/clear* bindings
 src/js/promises.zig       sleep(ms) host promise
@@ -41,7 +46,7 @@ src/js/console.zig        console.log/console.error
 tests/zig/                Zig integration tests and fixture harness
 tests/fixtures/           JavaScript fixtures used by the test harness
 examples/                 runnable demo scripts
-docs/                     architecture, CLI, testing, roadmap
+docs/                     architecture, CLI, testing, single-executable, roadmap
 .forgejo/workflows/       Forgejo Actions CI and release workflow
 ```
 
@@ -91,6 +96,15 @@ reference, plus this repository's experience. They are not a substitute for
 - An uncaught exception in a callback stops the loop and surfaces
   `error.JavaScriptError`. Report `name: message` and the JS stack.
 
+## Single executable apps
+
+`jszc` copies the built `jsz` binary and appends a payload. Keep the format and
+asset store in `src/sea.zig`; `src/jszc.zig` is only the build tool. Desktop
+payloads record a mode flag and resolve preload/HTML through embedded assets,
+which are extracted to `TMPDIR` for WebUI. `node:sea` exposes the same assets
+without extraction. Do not make the runtime depend on the build tree or a
+sibling `jsz` binary.
+
 ## Code style
 
 - Run `mise run fmt` before committing. CI runs `zig fmt --check`.
@@ -107,7 +121,7 @@ reference, plus this repository's experience. They are not a substitute for
 mise install          # install Zig 0.17.0 and hk
 mise run fmt          # format
 mise run fmt-check    # verify formatting
-mise run build        # debug build
+mise run build        # debug build (jsz + jszc)
 mise run build-release
 mise run test         # Zig integration + fixture tests
 mise run test-watch   # zig build test --watch

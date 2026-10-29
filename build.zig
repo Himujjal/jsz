@@ -39,6 +39,39 @@ pub fn build(b: *std.Build) !void {
     exe.root_module.linkLibrary(quickjs.artifact("quickjs-ng"));
     b.installArtifact(exe);
 
+    // `jszc` embeds the runtime it just built, so it can emit standalone
+    // executables without a sibling `jsz` or a Zig toolchain at run time.
+    // `@embedFile` resolves relative to the importing source, so the runtime is
+    // copied next to a generated import instead of embedding a build-relative
+    // path from `src/`.
+    const runtime_files = b.addWriteFiles();
+    const runtime_embed_src = runtime_files.add(
+        "runtime_embed.zig",
+        "pub const bytes: []const u8 = @embedFile(\"jsz-runtime\");\n",
+    );
+    _ = runtime_files.addCopyFile(exe.getEmittedBin(), "jsz-runtime");
+
+    const runtime_embed = b.createModule(.{
+        .root_source_file = runtime_embed_src,
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const jszc = b.addExecutable(.{
+        .name = "jszc",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/jszc.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "jsz", .module = jsz },
+                .{ .name = "runtime_embed", .module = runtime_embed },
+            },
+        }),
+    });
+    b.installArtifact(jszc);
+
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     run_cmd.addPassthruArgs();
@@ -52,6 +85,7 @@ pub fn build(b: *std.Build) !void {
     // build root as cwd, so a relative path is stable. A custom --prefix is not
     // carried over (Build has no configure-time install-path accessor in 0.17).
     test_options.addOption([]const u8, "jsz_exe", "zig-out/bin/jsz");
+    test_options.addOption([]const u8, "jszc_exe", "zig-out/bin/jszc");
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path("tests/zig/main.zig"),

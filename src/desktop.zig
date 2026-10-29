@@ -13,6 +13,7 @@ const jobs = @import("jobs.zig");
 const module = @import("module.zig");
 const EventLoop = @import("event_loop.zig").EventLoop;
 const Host = @import("js/host.zig").Host;
+const sea = @import("sea.zig");
 
 const Value = quickjs.Value;
 const c = quickjs.c;
@@ -103,6 +104,8 @@ const Preload = struct {
                 .window_id = window.id,
                 .argv = desktop.host.argv,
                 .environ = desktop.host.environ,
+                .assets = desktop.host.assets,
+                .is_sea = desktop.host.is_sea,
                 .entry = null,
             },
         };
@@ -117,17 +120,21 @@ const Preload = struct {
             self.deinitContents();
         }
 
-        const source = std.Io.Dir.cwd().readFileAllocOptions(
-            desktop.io,
-            path,
-            allocator,
-            .limited(max_module_bytes),
-            .of(u8),
-            0,
-        ) catch |err| {
-            std.debug.print("jsz: cannot read preload '{s}': {s}\n", .{ path, @errorName(err) });
-            return error.PreloadLoadFailed;
-        };
+        const asset: ?sea.Asset = if (desktop.store) |*store| store.find(path) else null;
+        const source: [:0]const u8 = if (asset) |found|
+            try allocator.dupeSentinel(u8, found.data, 0)
+        else
+            std.Io.Dir.cwd().readFileAllocOptions(
+                desktop.io,
+                path,
+                allocator,
+                .limited(max_module_bytes),
+                .of(u8),
+                0,
+            ) catch |err| {
+                std.debug.print("jsz: cannot read preload '{s}': {s}\n", .{ path, @errorName(err) });
+                return error.PreloadLoadFailed;
+            };
         defer allocator.free(source);
 
         const filename = try allocator.dupeSentinel(u8, path, 0);
@@ -223,6 +230,8 @@ pub const Desktop = struct {
     next_id: u32 = 1,
     started: bool = false,
     closing: bool = false,
+    /// Extracts embedded assets on first use; null outside `jszc` payloads.
+    store: ?sea.Store = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -241,6 +250,9 @@ pub const Desktop = struct {
             .loop = loop,
             .queue = queue,
         };
+        if (host.assets.len > 0) {
+            self.store = sea.Store.init(allocator, io, host.assets, host.environ);
+        }
 
         // `showWv` must not block waiting for the page to connect; the event
         // loop owns the GUI pump.
@@ -263,6 +275,8 @@ pub const Desktop = struct {
         self.events_mutex.unlock();
         self.events.deinit(self.allocator);
         self.events_mutex.deinit();
+
+        if (self.store) |*store| store.deinit();
 
         webui.exit();
         self.allocator.destroy(self);
@@ -358,9 +372,13 @@ pub const Desktop = struct {
             window.preload = try Preload.init(self, window, preload_file);
         }
 
-        const absolute = if (std.fs.path.isAbsolute(path))
-            try self.allocator.dupe(u8, path)
-        else blk: {
+        const absolute: []u8 = blk: {
+            if (self.store) |*store| {
+                if (try store.resolvePath(path)) |resolved| break :blk resolved;
+            }
+            if (std.fs.path.isAbsolute(path)) {
+                break :blk try self.allocator.dupe(u8, path);
+            }
             const cwd = std.process.currentPathAlloc(self.io, self.allocator) catch ".";
             defer if (!std.mem.eql(u8, cwd, ".")) self.allocator.free(cwd);
             break :blk try std.fs.path.resolveAlloc(self.allocator, &.{ cwd, path });
