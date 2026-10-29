@@ -117,9 +117,9 @@ function umask(mask) {
   return native.umask(mask);
 }
 
-// QuickJS has no nextTick queue, so this shares the microtask queue with
-// promises instead of running before them. Order is FIFO, which matches Node
-// for a single tick scheduled before any promise reaction.
+// QuickJS has one job queue, so nextTick shares it with promise reactions and
+// Node's "nextTick runs before promise callbacks" ordering is not guaranteed.
+// FIFO within a single tick still matches Node.
 function nextTick(callback, ...args) {
   if (typeof callback !== 'function') throw invalidArgType('callback', 'function', callback);
   queueMicrotask(() => callback(...args));
@@ -163,8 +163,9 @@ function writeChunk(nativeWrite, chunk, encoding) {
   throw invalidArgType('chunk', 'string or an instance of Buffer or Uint8Array', chunk);
 }
 
-function createStream(nativeWrite) {
+function createStream(nativeWrite, fd) {
   return {
+    fd,
     isTTY: false,
     columns: 80,
     rows: 24,
@@ -185,8 +186,8 @@ function createStream(nativeWrite) {
   };
 }
 
-const stdout = createStream(native.writeOut);
-const stderr = createStream(native.writeErr);
+const stdout = createStream(native.writeOut, 1);
+const stderr = createStream(native.writeErr, 2);
 
 let exitCode = 0;
 
@@ -196,9 +197,18 @@ const installed = new Set();
 
 // One Zig trampoline per native event; the registry stays here so `off`,
 // `once`, and `removeAllListeners` never cross the boundary.
+function signalHook(label) {
+  return {
+    set: (listener) => native.setSignalHook(label, listener),
+    clear: () => native.clearSignalHook(label),
+  };
+}
+
 const nativeHooks = {
   exit: { set: native.setExitHook, clear: native.clearExitHook },
-  SIGINT: { set: native.setSigintHook, clear: native.clearSigintHook },
+  SIGINT: signalHook('SIGINT'),
+  SIGTERM: signalHook('SIGTERM'),
+  SIGHUP: signalHook('SIGHUP'),
   uncaughtException: { set: native.setUncaughtHook, clear: native.clearUncaughtHook },
 };
 

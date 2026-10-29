@@ -226,6 +226,7 @@ class IncomingMessage extends EventEmitter {
       remotePort: payload.remotePort,
       localAddress: payload.localAddress,
       localPort: payload.localPort,
+      encrypted: payload.encrypted === true,
       destroyed: false,
       readable: true,
       writable: true,
@@ -1015,6 +1016,7 @@ class ClientRequest extends EventEmitter {
         httpVersion: '1.1',
         remoteAddress: this._url.hostname,
         remotePort: Number(this._url.port === '' ? (this._secure ? 443 : 80) : this._url.port),
+        encrypted: this._secure,
         keepAlive: true,
       });
       res.req = this;
@@ -1094,6 +1096,9 @@ function dispatch(id, event, payload) {
       return;
     }
 
+    // A TLS server sets this per request; the plain path always reports false
+    // so `req.socket.encrypted` exists instead of being absent.
+    payload.encrypted = server._tls !== null;
     const req = new IncomingMessage(payload);
     const res = new ServerResponse(id, payload.keepAlive);
     req.res = res;
@@ -1247,16 +1252,21 @@ class Server extends EventEmitter {
   }
 
   close(callback) {
-    if (typeof callback === 'function') {
-      if (this._serverId === null) queueMicrotask(callback);
-      else this._closeCallbacks.push(callback);
-    }
-
-    if (this._serverId === null) {
-      if (!this._closing) queueMicrotask(() => this._finishClose());
+    if (this._serverId === null && !this._closing) {
+      // Node emits `close` for a server that never listened and reports the
+      // failure to the callback instead of silently succeeding.
+      const error = new Error('Server is not running.');
+      error.code = 'ERR_SERVER_NOT_RUNNING';
+      // Node fires the close listener first, then hands the error to the
+      // callback, so keep the same microtask order.
+      this._closed = true;
+      queueMicrotask(() => emitSafely(this, 'close'));
+      if (typeof callback === 'function') queueMicrotask(() => callback(error));
       return this;
     }
-    if (this._closing) return this;
+
+    if (typeof callback === 'function') this._closeCallbacks.push(callback);
+    if (this._serverId === null || this._closing) return this;
 
     this._closing = true;
     this.listening = false;

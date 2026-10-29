@@ -56,10 +56,12 @@ pub const Queue = struct {
     }
 
     /// Undoes a `submit` whose task never started, without enqueueing the job.
+    /// Clamped: teardown can cancel a job twice, and a wrapped `usize` would
+    /// report no pending work, so `shutdown` could return with a job still live.
     pub fn cancel(self: *Queue) void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        self.pending -= 1;
+        self.pending -|= 1;
     }
 
     /// Appends a finished job to the completion list. Callable from an I/O task.
@@ -74,7 +76,11 @@ pub const Queue = struct {
             self.head = job;
         }
         self.tail = job;
-        self.pending -= 1;
+        // One completion follows exactly one `submit`; assert that before the
+        // clamped decrement so a double complete is loud in safety builds but
+        // can never wrap the counter and hide live work.
+        std.debug.assert(self.pending > 0);
+        self.pending -|= 1;
         self.cond.signal();
     }
 

@@ -234,7 +234,7 @@ check(
 
 // Error shapes.
 check('unknown-hash', codeOf(() => createHash('nope')) === 'Error:ERR_CRYPTO_HASH_UNKNOWN');
-check('unknown-hmac', codeOf(() => createHmac('nope', 'k')) === 'Error:ERR_CRYPTO_HASH_UNKNOWN');
+check('unknown-hmac', codeOf(() => createHmac('nope', 'k')) === 'Error:ERR_CRYPTO_INVALID_DIGEST');
 check('hash-non-string', codeOf(() => createHash(5)) === 'TypeError:ERR_INVALID_ARG_TYPE');
 check('hmac-bad-key', codeOf(() => createHmac('sha256', 5)) === 'TypeError:ERR_INVALID_ARG_TYPE');
 check('randomBytes-negative', codeOf(() => randomBytes(-1)) === 'RangeError:ERR_OUT_OF_RANGE');

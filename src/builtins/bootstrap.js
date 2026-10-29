@@ -6,6 +6,23 @@ import { webcrypto } from 'node:crypto';
 import { URL, URLSearchParams } from 'node:url';
 import EventEmitter from 'node:events';
 import { fetch, Headers, Response, Request } from 'node:http';
+import console from 'node:console';
+
+globalThis.console = console;
+
+// `performance.now` is monotonic milliseconds over `process.hrtime.bigint()`;
+// `timeOrigin` is a fixed wall-clock anchor taken once, like the browser API.
+function performanceNow() {
+  return Number(process.hrtime.bigint()) / 1e6;
+}
+
+globalThis.performance = {
+  now: performanceNow,
+  timeOrigin: Date.now() - performanceNow(),
+};
+
+// Node exposes the global object as `global`.
+globalThis.global = globalThis;
 
 globalThis.fetch = fetch;
 globalThis.Headers = Headers;

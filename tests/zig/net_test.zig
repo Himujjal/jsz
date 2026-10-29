@@ -28,6 +28,24 @@ test "net destroy while connecting and after connect" {
     );
 }
 
+test "net sockets report encrypted false" {
+    const result = try helpers.runFixtureStdout(std.testing.allocator, "net/encrypted.mjs");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings(
+        "client false true\nserver false true\nclosed\n",
+        result,
+    );
+}
+
+test "net close before listen reports ERR_SERVER_NOT_RUNNING" {
+    const result = try helpers.runFixtureStdout(std.testing.allocator, "net/close_not_running.mjs");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings(
+        "code ERR_SERVER_NOT_RUNNING\nlistening false address null\n",
+        result,
+    );
+}
+
 test "net shutdown with live handles" {
     const result = try helpers.runFixtureStdout(std.testing.allocator, "net/shutdown.mjs");
     defer std.testing.allocator.free(result);

@@ -33,12 +33,14 @@ that prints `timeout` and exits non-zero when an operation hangs.
 | `tests/zig/http_test.zig` | `http.createServer` request/response, streamed chunks with a raw chunked framing check, custom status line, declared length and `drain`, `http.request`/`http.get`, `https.createServer`, `https.request` handshake/streaming/insecure, mTLS and PFX certificates, close draining, and shutdown with a live listener. |
 | `tests/zig/pkcs12_test.zig` | PKCS#12/PFX parsing: encrypted PFX to PEM, legacy LibreSSL PBE algorithms, malformed input, and wrong passphrases (modern and legacy). |
 | `tests/zig/fetch_test.zig` | Global `fetch` against a local `http` server, redirect modes, final URLs, in-flight abort, and the `599 Custom Reason` status line. |
+| `tests/zig/differential_test.zig` | Optional parity check: runs the differential corpus through jsz and a real `node`, then compares stdout byte-for-byte. |
 | `tests/fixtures/modules/` | ESM imports, cycles, dynamic import, and resolution errors. |
 | `tests/fixtures/net/` | TCP echo, `ECONNREFUSED`, and live-handle shutdown. |
 | `tests/fixtures/http/` | HTTP server/fetch round trip, `http.request`/`http.get`, server response streaming over raw `net` framing, close draining, and live-listener shutdown. |
 | `tests/fixtures/https/` | `https.createServer` bind/close with PEM, client handshake with CA verification, streaming and `rejectUnauthorized: false`, mTLS, and PFX on both sides. |
 | `tests/fixtures/fetch/` | `fetch`, `Headers`, JSON, POST echo, 404, redirects, redirect modes, final URLs, and abort. |
 | `tests/fixtures/node/` | Curated fixtures ported from the Node.js test suite. |
+| `tests/fixtures/differential/` | The deterministic corpus compared against a real `node` binary. |
 
 ## Guards and helpers
 
@@ -74,6 +76,39 @@ its test expects `error.JavaScriptError` plus `boom` in the captured output.
 
 Network fixtures use a `setTimeout` watchdog that prints `timeout` and calls
 `process.exit(1)` so a hang fails fast instead of waiting for the runtime guard.
+
+## Differential tests
+
+`tests/zig/differential_test.zig` compares jsz against a real `node` binary. It
+runs `tests/fixtures/differential/corpus.mjs` twice: once in-process through
+`helpers.runFixtureStdout`, once as a `node` child process. The two stdout
+streams must match byte-for-byte. A mismatch fails the test and prints both line
+counts plus a unified diff with context.
+
+The corpus is deliberately narrow. It covers `node:path` (posix and win32:
+`join`, absolute `resolve`, `normalize`, `dirname`, `basename`, `extname`,
+`relative`, `parse`/`format`, `isAbsolute`), `node:buffer` (`Buffer.from` and
+`toString` for utf8, hex, base64, base64url, latin1, and utf16le, plus
+`Buffer.concat` and `byteLength`), `node:url` (`URL` properties, relative
+resolution, mutations, and `URLSearchParams` round-trips), and `node:util`
+(`format` with `%s`, `%d`, `%i`, `%f`, `%j`, `%o`, `%O`, `%c`, `%%`, and extra
+arguments). Each case prints one `<label>=<value>` line.
+
+Cases must stay deterministic: no time, environment, cwd, network, or
+filesystem inputs, and no `resolve` calls that would read the working
+directory. The corpus is a regression guard for behavior jsz and node already
+agree on, not a record of known divergences.
+
+The test self-skips when `node` is not on `PATH` (it probes with `node
+--version` and maps spawn failure to `error.SkipZigTest`), so offline CI stays
+green. To require it locally, run the suite with `node` on `PATH`:
+
+```sh
+PATH="$(dirname "$(command -v node)"):$PATH" mise run test
+```
+
+Check the run report; `differential_test` appears as `SKIP` when the probe
+fails and as a normal test otherwise.
 
 ## Running tests
 
@@ -114,6 +149,7 @@ parsing, and fetch. The exact test count changes as coverage grows;
 | `http_test.zig` | `http.createServer` with fetch round trips, keep-alive, `server.close()` draining, streamed response chunks and raw framing, custom status line, `drain`, `http.request`/`http.get`, `https.createServer` bind/close, `https.request` handshake and streaming, mTLS/PFX, and shutdown with a live listener. |
 | `pkcs12_test.zig` | PFX parse to PEM with PBES2/AES and legacy PBE, malformed input, wrong passphrase. |
 | `fetch_test.zig` | Text, JSON, POST echo, response headers, 404, redirect following, redirect modes, final URLs, in-flight abort, and an arbitrary `599 Custom Reason`. |
+| `differential_test.zig` | Optional `node` parity for the deterministic path/buffer/url/util corpus; skips without `node`. |
 
 ## Adding a test
 

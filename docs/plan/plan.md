@@ -1,6 +1,6 @@
 # jsz Node.js 90% compatibility plan
 
-Status: Phases 0, 1, 2, 3A, 3B, 4, 5 implemented; see §15 Backlog
+Status: Phases 0 through 6 implemented; see §15 Backlog for residual P2/P3 work
 Target runtime: Zig 0.17.0, QuickJS-ng 0.17.0 (via `zig-quickjs-ng`, pinned
 in `build.zig.zon`), zio 0.19.0
 Target Node semantics: Node.js 22 LTS, POSIX first, Windows best-effort
@@ -1660,51 +1660,55 @@ Open questions:
 
 ## 12. Appendix A - coverage matrix
 
-Legend: `now` = exists today, `plan` = in this plan, `defer` = last 10%.
+Legend: `now` = shipped, `defer` = intentionally out of the 90% set.
 Statuses are refreshed as phases land; live status and open work are in §15.
 
 | API | Status | Phase |
 | --- | --- | --- |
-| `console.log/error` | now | - |
-| `setTimeout`/`setInterval`/`clear*` | now | - |
-| `sleep(ms)` | now | - |
-| ESM `import`/`export` | plan | 0 |
-| `node:` and bare builtin specifiers | plan | 0 |
-| `import.meta.url`/`main` | plan | 0 |
-| `path.*` (posix + win32) | plan | 3B |
-| `fs` callbacks (`readFile`, `writeFile`, `appendFile`, ...) | plan | 2 |
-| `fs.promises` (same surface) | plan | 2 |
-| `fs.mkdir`, `readdir`, `rm`, `rmdir`, `rename`, `copyFile`, `cp` | plan | 2 |
-| `fs.stat`, `lstat`, `fstat`, `access`, `realpath` | plan | 2 |
-| `fs.chmod`, `chown`, `symlink`, `readlink` | plan | 2 |
-| `fs.open/read/write/close` | plan | 2 |
+| `console.log/error` plus `info`/`warn`/`debug`/`trace`/`dir`/`assert`/`time`/`timeEnd` | now | 0, 6 |
+| `setTimeout`/`setInterval`/`clear*` | now | 0 |
+| `sleep(ms)` | now | 0 |
+| `performance.now`/`timeOrigin`, `globalThis.global` | now | 6 |
+| ESM `import`/`export` | now | 0 |
+| `node:` and bare builtin specifiers | now | 0 |
+| `import.meta.url`/`main` | now | 0 |
+| `path.*` (posix + win32) | now | 3B |
+| `fs` callbacks (`readFile`, `writeFile`, `appendFile`, ...) | now | 2 |
+| `fs.promises` (same surface) | now | 2 |
+| `fs.mkdir`, `readdir` (incl. `recursive`), `rm`, `rmdir`, `rename`, `copyFile`, `cp` | now | 2, 6 |
+| `fs.stat`, `lstat`, `fstat`, `access`, `realpath` | now | 2 |
+| `fs.chmod`, `chown`, `symlink`, `readlink` | now | 2 |
+| `fs.open/read/write/close` (incl. numeric `O_*` flags) | now | 2, 6 |
+| `fs.opendir` | defer | - |
 | `fs.*Sync`, `fs.existsSync` | defer | - |
 | `fs.watch`, streams | defer | - |
-| `process.argv/env/cwd/chdir/exit` | plan | 3A |
-| `process.hrtime`, `uptime`, `memoryUsage` | plan | 3A |
-| `process.stdout/stderr` | plan | 3A |
+| `process.argv/env/cwd/chdir/exit` | now | 3A |
+| `process.hrtime`, `uptime`, `memoryUsage` | now | 3A |
+| `process.stdout/stderr` (`fd`, signals) | now | 3A, 6 |
 | `process.stdin` | defer | - |
-| `child_process.spawnSync/execSync` | plan | 4 |
-| `child_process.spawn/exec` | plan | 4 |
+| `child_process.spawnSync/execSync` | now | 4 |
+| `child_process.spawn/exec` | now | 4 |
 | `child_process.fork` | defer | - |
-| `URL`, `URLSearchParams` | plan | 3B |
-| `url.pathToFileURL`, `fileURLToPath` | plan | 3B |
+| `URL`, `URLSearchParams` | now | 3B |
+| `url.pathToFileURL`, `fileURLToPath` | now | 3B |
 | `http.createServer` | now | 5 |
 | `http.request`/`http.get` (streaming response bodies) | now | 5 |
 | `https.createServer` (PEM, `pfx`, mTLS) | now | 5 |
 | `https.request`/`https.get`, TLS client options | now | 5 |
-| `fetch`, `Headers`, `Response` | now | 5 |
+| `socket.encrypted` on HTTP/HTTPS/TCP sockets | now | 6 |
+| `fetch`, `Headers`, `Response`, `Request` | now | 5 |
 | `net` TCP servers/clients | now | 5 |
-| `crypto.createHash`, `createHmac` | plan | 3A |
-| `crypto.randomBytes/UUID/randomInt/getRandomValues` | plan | 3A |
-| `crypto.timingSafeEqual`, `webcrypto.subtle` | defer | - |
-| `util.format/inspect/types/promisify` | plan | 3B |
-| `events.EventEmitter` | plan | 3B |
-| `os.platform/arch/homedir/tmpdir/cpus` | plan | 3A |
+| `crypto.createHash`, `createHmac` | now | 3A |
+| `crypto.randomBytes/UUID/randomInt/getRandomValues` | now | 3A |
+| `crypto.timingSafeEqual` | now | 3A |
+| `webcrypto.subtle`, ciphers, key generation, signing | defer | - |
+| `util.format/inspect/types/promisify` | now | 3B |
+| `events.EventEmitter` | now | 3B |
+| `os.platform/arch/homedir/tmpdir/cpus` | now | 3A |
 | `os.networkInterfaces` | defer | - |
-| `Buffer` | plan | 1 |
-| `TextEncoder`/`TextDecoder`/`atob`/`btoa` | plan | 1 |
-| `net`, `tls`, `dns`, `zlib`, `worker_threads`, `readline`, `assert` | defer | - |
+| `Buffer` | now | 1 |
+| `TextEncoder`/`TextDecoder`/`atob`/`btoa` | now | 1 |
+| `tls`, `dns`, `zlib`, `worker_threads`, `readline`, `assert`, `dgram` | defer | - |
 
 ---
 
@@ -1784,7 +1788,12 @@ Status snapshot for this section (2026-10-28):
   client use `dusty.Client`; TCP uses zio. Server responses and client response
   bodies stream; request bodies and `fetch` bodies are buffered. Deviations and
   follow-ups are in §15.6.
-- Phase 6 (fidelity/hardening) has not started.
+- Phase 6 (fidelity/hardening) has landed: `console` formatting with
+  `dir`/`trace`/`assert`/`time`, `performance`, `globalThis.global`,
+  SIGTERM/SIGHUP listeners, recursive `readdir`, numeric `O_*` flags, `dest` on
+  two-path errors, `Dirent.parentPath`, `Stats.blksize`, job-queue accounting
+  guards, `ERR_SERVER_NOT_RUNNING`, `socket.encrypted`, and an optional Node
+  differential test. Residual items are the rows still marked P2/P3 below.
 
 This section is the single list of work intentionally left undone. Each item
 names the phase that should pick it up and a priority:
@@ -1797,29 +1806,30 @@ names the phase that should pick it up and a priority:
 
 | Item | Current state | Next step | Priority |
 | --- | --- | --- | --- |
-| `readdir({ recursive: true })` | not implemented; `cp` has its own recursion | Add a recursive walk in `node:_fs` once `Dirent` traversal is stable | P2 |
+| `readdir({ recursive: true })` | implemented as a depth-first JS walk over native `readdir`; `withFileTypes` entries carry `parentPath` and the legacy `path` alias | Keep output sorted and root-relative | - |
 | `fs.opendir` | deferred | Requires a `Dir` handle lifetime across calls; revisit with the fd work | P2 |
 | `fs.watch`, `watchFile`, `createReadStream`, `createWriteStream` | explicit `ERR_METHOD_NOT_IMPLEMENTED` | Stay deferred with the stream work (last 10%) | P3 |
 | `cp` option fidelity | `preserveTimestamps` not implemented; mode bits best-effort | Add `preserveTimestamps` if a fixture needs it | P3 |
-| `existsSync` | deliberately absent | Keep absent; document in the README compatibility table | P3 |
-| fd deviations | string flags only (no numeric `O_*`); `position` is an integer or `null`; `a`/`a+` is seek-to-end, not atomic `O_APPEND`; `fs.close(0\|1\|2)` is `EBADF`; `mkdtemp` always uses `os.tmpdir()` and a 16-hex suffix | Convert numeric flags (`constants.O_*`) and use real `O_APPEND` when `std.Io.File` exposes it | P2 |
+| `existsSync` | deliberately absent and documented in the README | Keep absent | - |
+| `errno` numeric values | hardcoded from the macOS table in `src/fs.zig`; `net`/`fetch` have their own tables | Read them from `std.posix.E` per OS so Linux/Windows values match | P2 |
+| fd deviations | numeric `O_*` flags translate to the supported string flags; `O_SYNC`/`O_DSYNC` are accepted but not honored; `position` is an integer or `null`; `a`/`a+` is seek-to-end, not atomic `O_APPEND`; `fs.close(0\|1\|2)` is `EBADF`; `mkdtemp` always uses `os.tmpdir()` and a 16-hex suffix | Honor sync bits and use real `O_APPEND` when `std.Io` exposes them | P3 |
 
 ### 15.2 Phase 3A follow-ups (`process`, `os`, `crypto`)
 
 | Item | Current state | Next step | Priority |
 | --- | --- | --- | --- |
-| Signal coverage | only `SIGINT` is watched (`zio.Signal.init(.interrupt)`); `SIGTERM`/`SIGHUP` use the OS default | Generalize the watcher to a per-signal registry (`terminate`, `hangup`, `user1`, `user2`) | P2 |
+| Signal coverage | `SIGINT`, `SIGTERM`, and `SIGHUP` use a per-signal registry (`zio.Signal` watchers + `process.on` trampolines); no listener exits `128+signum` | Add `user1`/`user2` if a caller needs them | P3 |
 | Unhandled rejections | prints `UnhandledPromiseRejectionWarning: <reason>` and exits 1 | Node 22 defaults to throwing `ERR_UNHANDLED_REJECTION`; match that or add `--unhandled-rejections` | P2 |
 | `process.stdin` | absent | Deferred with `readline`; needs a non-blocking stdin reader on the loop | P3 |
 | `process.memoryUsage()` heap fields | `heapTotal`/`heapUsed`/`external`/`arrayBuffers` are `0`; `rss` is real | QuickJS does not expose its allocator; revisit only if QuickJS-ng adds stats | P3 |
-| `process.nextTick` ordering | implemented as `queueMicrotask` | QuickJS has one job queue; nextTick cannot preempt promise reactions. Document the ordering difference | P2 |
+| `process.nextTick` ordering | implemented as `queueMicrotask`; the ordering difference from Node is documented in `process.js` and the README | QuickJS has one job queue, so nextTick cannot preempt promise reactions | - |
 | `process.emitWarning` formatting | approximate `(node:<pid>) [<code>] <Type>: <msg>` | Match Node's exact prefix once stderr is stable | P3 |
 | `process.execPath` | `std.process.executablePathAlloc`, falling back to `argv[0]` | Verify against symlinked installs and `bun`/`node` style shims | P3 |
 | `os.freemem()` | omitted | Implement with libc `sysctl`/`sysinfo` per OS, or keep omitted and document | P3 |
 | `os.networkInterfaces()` | omitted | No std API; needs libc `getifaddrs` + address formatting | P3 |
 | `os.cpus()` counters | synthetic: `model: "unknown"`, `speed: 0`, zero `times` | Correct length only; per-core counters need libc | P3 |
 | `os.userInfo()` | derived from env (`USER`/`LOGNAME`/`SHELL`) + `getuid`/`getgid` | Use `getpwuid_r` for `username`/`homedir`/`shell` when libc is linked | P3 |
-| `crypto` HMAC error code | unknown algorithm reports `ERR_CRYPTO_HASH_UNKNOWN` | Node 22 HMAC uses `ERR_CRYPTO_INVALID_DIGEST`; split the codes | P2 |
+| `crypto` HMAC error code | split: `createHmac` reports `ERR_CRYPTO_INVALID_DIGEST`; `createHash` keeps `ERR_CRYPTO_HASH_UNKNOWN` | Keep aligned with Node | - |
 | `crypto.getRandomValues` quota error | plain `Error` named `QuotaExceededError`, `.code = ERR_OUT_OF_RANGE` | Node throws a `DOMException`; QuickJS has no `DOMException` class, so either ship a shim or document | P3 |
 | `Hmac#copy()` | implemented although Node 22 lacks it | Harmless superset; keep or remove for parity | P3 |
 | `pbkdf2Sync`, `scryptSync` | not implemented (stretch) | `std.crypto.pwhash`; defer until a caller needs it | P3 |
@@ -1837,7 +1847,7 @@ names the phase that should pick it up and a priority:
 | `url.urlToHttpOptions` | implemented in `url.js` and exported from `node:url` | Keep aligned with `http.request` options | P3 |
 | `fileURLToPath` edge cases | POSIX only: no drive letters, encoded NUL rejected (Node allows it) | Add Windows drive handling with the Windows work | P2 |
 | `node:_url` | empty native stub; helpers are pure JS | Delete the registry entry, or move `pathToFileURL`/`fileURLToPath` percent-encoding there if JS becomes a bottleneck | P3 |
-| `util.inspect` fidelity | `[Circular]` instead of `<ref *1>`, Error prints the stack head, Promise always `<pending>`, `ArrayBuffer` prints `ByteLength`, `%j` on BigInt falls back to `[Circular]`, simplified wrapping | Improve only where fixtures or users depend on the exact shape | P3 |
+| `util.inspect` fidelity | `[Circular]` instead of `<ref *1>`, Error prints the stack head, Promise always `<pending>`, `ArrayBuffer` prints `ByteLength`, `%j` on BigInt falls back to `[Circular]`, simplified wrapping. `%o` is compact and exposes `[length]` on arrays after the Phase 6 fix | Improve only where fixtures or users depend on the exact shape | P3 |
 | `util.parseArgs` | not implemented (stretch) | Add when a builtin or example needs it | P3 |
 | `events.on(emitter, name)` | async iterator not implemented (stretch) | Needed by `readline`/streams later; `events.once` is done | P3 |
 | `util.deprecate` output | writes via `process.stderr` when present | Re-check after `process.on` and stderr hooks land | P3 |
@@ -1846,11 +1856,12 @@ names the phase that should pick it up and a priority:
 
 | Item | Current state | Next step | Priority |
 | --- | --- | --- | --- |
-| `performance` global | absent | `{ now(), timeOrigin }` over `zio.now()` | P2 |
-| `globalThis.global` | absent | Alias `globalThis` (Node compat) | P3 |
+| `performance` global | implemented: `{ now(), timeOrigin }` over `process.hrtime.bigint()` | Add `mark`/`measure` only if a caller needs them | - |
+| `globalThis.global` | implemented as an alias of `globalThis` | None | - |
 | `structuredClone` | deferred | QuickJS lacks it; implement over JSON only for plain data, or keep deferred | P3 |
-| `console` extras | `log`/`error` only | Add `info`, `warn`, `debug`, `trace`, `dir`, `time`/`timeEnd` over the shared writer | P2 |
+| `console` extras | implemented: `log/info/warn/error/debug` format via `util.format`, plus `trace`, `dir`, `assert`, `time`/`timeEnd`; `warn`/`error` use the stderr writer | Add `table`/`group`/`count` only if needed | - |
 | `import.meta.resolve` | not implemented | Needs a synchronous resolver; document as unsupported | P3 |
+| Shutdown promise settlement | queue shutdown aborts queued jobs (`abort` frees them) but does not reject their promises; the loop is stopping, so no JS observes them | Reject with an internal `ERR_JSZ_SHUTDOWN` only if an embedder can outlive `run()` | P3 |
 | Dynamic `import()` | covered by `tests/fixtures/modules/dynamic.mjs`: entry, timer, microtask, `file:` URL, percent-encoded paths, directory index probing, cache identity, caught failures, and an uncaught rejection that exits 1 | Keep extending when new loader paths land | - |
 | Dynamic import of a throwing module | fixed by QuickJS-ng 0.17.0 (`js_promise_set_handled` for the internal module-evaluation promise) | Re-check on every engine bump | - |
 | Module resolution errors | `ERR_MODULE_NOT_FOUND`, `ERR_UNKNOWN_BUILTIN_MODULE`, `ERR_INVALID_MODULE_SPECIFIER`, `ERR_UNSUPPORTED_ESM_URL_SCHEME` with Node-shaped `code` | Add `url`/`path` fields only if a fixture needs them | - |
@@ -1898,12 +1909,13 @@ State as of 2026-10-28. Implemented rows are exercised by
 | Item | Current state | Next step | Priority |
 | --- | --- | --- | --- |
 | HTTP response streaming | implemented: the first `write`/`flushHeaders` commits the status line and headers (`streamStart`), `streamWrite` queues chunks for the dusty handler to frame, and `streamEnd` terminates. A 64 KiB high-water queue returns false from `write` and a `drain` job fires below 16 KiB; `destroy` calls `streamAbort`. Headers are immutable after send (`ERR_HTTP_HEADERS_SENT`). Not a `Writable`: no `cork`/`uncork`, `writev`, or `writableLength` | Move the queue onto a `Writable` once streams land | P2 |
-| `http.request`/`http.get` | implemented over the streaming `dusty.Client`: `ClientRequest` writes/end, then `response` emits `IncomingMessage` `data`/`end`/`close` with ack-based pause/resume and 16 KiB reads; `complete` is false until EOF; no redirects; `url.urlToHttpOptions` is exported | Add `socket.encrypted` and redirect following if callers need them | P3 |
+| `http.request`/`http.get` | implemented over the streaming `dusty.Client`: `ClientRequest` writes/end, then `response` emits `IncomingMessage` `data`/`end`/`close` with ack-based pause/resume and 16 KiB reads; `complete` is false until EOF; no redirects; `url.urlToHttpOptions` is exported | Add redirect following if callers need it | P3 |
+| `socket.encrypted` | set on server requests and client responses (`true` over TLS, `false` on plain HTTP/TCP) | None | - |
 | `https.request`/`https.get` | implemented on the same streaming path with `ca` (string/Buffer/array), `cert`+`key`, `pfx`+`passphrase`, and `rejectUnauthorized` (default true). `servername` is accepted but ignored (dusty derives SNI from the URL). Each distinct TLS configuration has its own cached `dusty.Client` and connection pool | Add a SNI override if dusty exposes one | P3 |
 | `statusMessage` | implemented: the patched dusty writes the caller's reason phrase on the status line; an absent phrase falls back to `STATUS_CODES[code] || 'unknown'`; CR/LF raises `ERR_INVALID_CHAR` | Keep the patch in sync when dusty is upgraded | P3 |
 | Arbitrary status codes | implemented for 100-999: the response path is numeric and the patched client parser accepts codes its `Status` enum does not name; `fetch` asserts `599 Custom Reason` | Re-apply the patch on every dusty bump | P3 |
 | HTTPS server | implemented: PEM `cert`/`key`, `pfx`+`passphrase` (pure-Zig PKCS#12 in `src/pkcs12.zig`), `ca`, `requestCert`, and `rejectUnauthorized` map to dusty's `ServerConfig.Tls` and `client_auth` (`.require`/`.request`). PFX MAC verification, RC4 PFX, and non-AES PBES2 are rejected | Add MAC verification if a fixture requires it | P3 |
-| `server.close()` semantics | stops accepting and lets in-flight handlers finish through dusty's drain; the callback and `close` event run after the drain, not on a forced 503 | Keep aligned if dusty's shutdown policy changes | P2 |
+| `server.close()` semantics | `http.Server` stops accepting and lets in-flight handlers finish through dusty's drain; the callback and `close` event run after the drain, not on a forced 503. Closing a server that never listened emits `close` and reports `ERR_SERVER_NOT_RUNNING`. `net.Server.close()` does not wait for accepted sockets | Keep aligned if dusty's shutdown policy changes | P2 |
 | `fetch` bodies | response bodies are read whole and capped at 10 MiB; `res.text()`/`json()`/`bytes()` are buffered. Request bodies are sent as one buffer | Stream the response body and request body once streams land | P2 |
 | `fetch` reason phrases | HTTP/1.1 reason phrases come from the parser; HTTP/2 responses do not preserve the wire reason phrase | Document the HTTP/2 difference | P3 |
 | HTTP request bodies | buffered whole by the dusty handler, 1 MiB cap; `req` has no incremental read | Add a pull-based body stream in `src/http.zig` | P2 |
@@ -1916,7 +1928,7 @@ State as of 2026-10-28. Implemented rows are exercised by
 ### 15.7 Deferred last 10%
 
 Full streams, streaming `fetch` and HTTP request bodies, trailers, interim 1xx
-responses, `socket.encrypted`, the `tls` module, `dns`, `zlib`,
+responses, the `tls` module, `dns`, `zlib`,
 `worker_threads`, `readline`, `assert`, `child_process.fork`,
 `webcrypto.subtle`, ciphers/key generation/signing, `fs.watch`, PFX MAC
 verification, RC4 PFX, and non-AES PBES2.
@@ -1926,14 +1938,14 @@ verification, RC4 PFX, and non-AES PBES2.
 moved out of this list on 2026-10-28.
 
 `crypto.timingSafeEqual` moved out of this list: it is implemented in Phase 3A
-and should be marked `now` when Appendix A is refreshed.
+and marked `now` in Appendix A.
 
 ### 15.8 Testing and documentation
 
 | Item | Current state | Next step | Priority |
 | --- | --- | --- | --- |
 | Node-test porting for 3A/3B | curated fixtures only for the implemented surface | Extend the §10.1 mapping (`test-process-*`, `test-os-*`, `test-crypto-*`, `test-path-*`, `test-url-*`, `test-util-*`, `test-events-*`) | P2 |
-| Differential tests vs Node | `path` was diffed manually during 3B (60 cases, byte-identical) | Add an optional, skipped-when-absent `node` differential test for `path`, `url`, `util.format`, and `Buffer` encodings | P2 |
-| Appendix A accuracy | statuses are the plan-time snapshot | Refresh to `now`/`plan`/`defer` at Phase 6 | P2 |
-| Docs | plan only | Update `docs/roadmap.md`, `docs/testing.md`, and the README compatibility table, including async-only `fs`, `-e` module detection, and the global set | P2 |
+| Differential tests vs Node | optional `tests/zig/differential_test.zig` runs a deterministic corpus through jsz and a local `node`, compares stdout byte-for-byte, and skips when `node` is absent; covers `path`, `Buffer`, `URL`, and `util.format` | Add cases as new surfaces land | - |
+| Appendix A accuracy | refreshed to `now`/`defer` at Phase 6 | Keep it current when a backlog row lands | - |
+| Docs | README, roadmap, and testing docs updated with the Phase 6 surface and deviations | None | - |
 | Leak `std.testing.allocator` coverage | green for the current suite | Keep extending to every native entry, including error paths | P3 |

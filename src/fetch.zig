@@ -756,7 +756,10 @@ fn settleStream(ctx: *quickjs.Context, link: *jobs.Job) void {
             job.terminated = true;
             job.eventDone(ctx);
         },
-        .failure => {
+        .failure, .response => {
+            // `.response` is only the enum default and is never queued for a
+            // stream; treat it as a failed head (EIO) so a stray event rejects
+            // the promise instead of panicking in production.
             const failure = job.failure orelse Failure{ .err = error.Unexpected, .code = "EIO", .errno = -5 };
             const error_value = makeError(ctx, failure);
             defer error_value.deinit(ctx);
@@ -770,7 +773,6 @@ fn settleStream(ctx: *quickjs.Context, link: *jobs.Job) void {
             job.terminated = true;
             job.eventDone(ctx);
         },
-        .response => unreachable,
     }
 }
 

@@ -48,6 +48,15 @@ function hashUnknown(algorithm) {
   return error;
 }
 
+/// Node 22 splits the codes: `createHash` keeps the digest-unknown error while
+/// HMAC reports an invalid digest.
+function invalidDigest(algorithm) {
+  const error = new Error(`Invalid digest: ${algorithm}`);
+  error.code = 'ERR_CRYPTO_INVALID_DIGEST';
+  error.algorithm = algorithm;
+  return error;
+}
+
 function hashFinalized() {
   const error = new Error('Digest already called');
   error.code = 'ERR_CRYPTO_HASH_FINALIZED';
@@ -71,9 +80,20 @@ function quotaExceeded(byteLength) {
 
 function normalizeAlgorithm(algorithm) {
   if (typeof algorithm !== 'string') throw invalidArgType('algorithm', 'string', algorithm);
-  const canonical = ALGORITHMS.get(algorithm.toLowerCase());
+  const canonical = digestOf(algorithm);
   if (canonical === undefined) throw hashUnknown(algorithm);
   return canonical;
+}
+
+function normalizeHmacAlgorithm(algorithm) {
+  if (typeof algorithm !== 'string') throw invalidArgType('algorithm', 'string', algorithm);
+  const canonical = digestOf(algorithm);
+  if (canonical === undefined) throw invalidDigest(algorithm);
+  return canonical;
+}
+
+function digestOf(algorithm) {
+  return ALGORITHMS.get(algorithm.toLowerCase());
 }
 
 /// Copies any Buffer/TypedArray/DataView/ArrayBuffer into a Buffer; strings
@@ -96,8 +116,8 @@ function toByteView(value, name) {
 }
 
 class HashBase {
-  constructor(algorithm) {
-    this[kAlgorithm] = normalizeAlgorithm(algorithm);
+  constructor(algorithm, normalize = normalizeAlgorithm) {
+    this[kAlgorithm] = normalize(algorithm);
     this[kChunks] = [];
     this[kDigested] = false;
   }
@@ -143,7 +163,7 @@ class Hash extends HashBase {
 
 class Hmac extends HashBase {
   constructor(algorithm, key, options) {
-    super(algorithm);
+    super(algorithm, normalizeHmacAlgorithm);
     const encoding =
       options === null || options === undefined
         ? undefined
@@ -159,7 +179,7 @@ class Hmac extends HashBase {
 
   _digest() {
     const bytes = native.hmac(this[kAlgorithm], this[kKey], Buffer.concat(this[kChunks]));
-    if (bytes === null) throw hashUnknown(this[kAlgorithm]);
+    if (bytes === null) throw invalidDigest(this[kAlgorithm]);
     return Buffer.from(bytes);
   }
 }

@@ -102,6 +102,31 @@ test "cancel rolls back a submit whose task never started" {
     try std.testing.expect(!queue.hasPending());
 }
 
+test "double cancel neither wraps pending nor stalls shutdown" {
+    const runtime = try helpers.initRuntime(null);
+    defer runtime.deinit();
+
+    var recorder: Recorder = .{};
+    var fake: Fake = undefined;
+    fake.init(&recorder, 0);
+
+    var queue = jobs.Queue.init(std.testing.allocator);
+    defer queue.deinit();
+
+    try queue.submit(&fake.job);
+    queue.cancel();
+    // A retried teardown cancels again; a wrapping `-=` would make this huge.
+    queue.cancel();
+
+    try std.testing.expect(!queue.hasPending());
+    try std.testing.expect(!queue.hasWork());
+
+    // A wrapped counter would keep shutdown waiting for work that already ended.
+    queue.shutdown(runtime.context());
+    try std.testing.expect(!queue.hasWork());
+    try std.testing.expectError(error.Closed, queue.submit(&fake.job));
+}
+
 test "shutdown aborts queued completions and refuses new work" {
     const runtime = try helpers.initRuntime(null);
     defer runtime.deinit();

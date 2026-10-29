@@ -19,6 +19,10 @@ export const constants = {
   O_EXCL: 128,
   O_TRUNC: 512,
   O_APPEND: 1024,
+  // The sync bits are accepted for Node compatibility but the translator opens
+  // without O_SYNC, so they never reach a syscall.
+  O_DSYNC: 4096,
+  O_SYNC: 8192,
   S_IFMT: 0o170000,
   S_IFREG: 0o100000,
   S_IFDIR: 0o040000,
@@ -75,15 +79,10 @@ function readOptions(options) {
 }
 
 function writeFlag(options) {
-  if (options == null) return 'w';
-  if (typeof options === 'string') return options;
+  if (options == null) return null;
+  if (typeof options === 'string') return null;
   if (typeof options !== 'object') throw invalidArg('options', options);
-  return typeof options.flag === 'string' ? options.flag : 'w';
-}
-
-function writeMode(options) {
-  if (options == null || typeof options !== 'object') return 0o666;
-  return typeof options.mode === 'number' ? options.mode : 0o666;
+  return normalizeFlags(options.flag, 'flag');
 }
 
 function mkdirMode(options) {
@@ -157,19 +156,114 @@ const OPEN_FLAG_NAMES = new Set([
   'a', 'ax', 'xa', 'a+', 'ax+', 'xa+', 'as', 'as+',
 ]);
 
-function checkFlags(flags) {
-  if (typeof flags !== 'string' || !OPEN_FLAG_NAMES.has(flags)) {
-    throw invalidArg('flags', flags, 'is invalid');
-  }
-  return flags;
+const WRITE_FLAG_NAMES = new Set([
+  'w', 'wx', 'xw', 'w+', 'wx+', 'xw+',
+  'a', 'ax', 'xa', 'a+', 'ax+', 'xa+', 'as', 'as+',
+]);
+
+const ACCESS_MASK = constants.O_WRONLY | constants.O_RDWR;
+const SYNC_BITS = constants.O_SYNC | constants.O_DSYNC;
+const FLAG_BITS =
+  constants.O_CREAT | constants.O_EXCL | constants.O_TRUNC | constants.O_APPEND | SYNC_BITS;
+
+function unsupportedFlags(name, value, detail) {
+  return invalidArg(name, value, `is invalid (${detail})`);
 }
 
-async function openFd(path, flags, mode) {
-  checkFlags(flags);
-  const fd = await native.open(path, flags, mode === undefined ? 0o666 : mode);
+/// Accepts Node's string flags or a numeric `fs.constants.O_*` mask and returns
+/// a translator-supported string. Masks the driver cannot express are rejected
+/// rather than silently rewritten to another mode.
+function normalizeFlags(flags, name = 'flags') {
+  if (flags === undefined || flags === null) return null;
+  if (typeof flags === 'string') {
+    if (!OPEN_FLAG_NAMES.has(flags)) throw invalidArg(name, flags, 'is invalid');
+    return flags;
+  }
+  if (typeof flags !== 'number') throw invalidArgType(name, 'string or integer', flags);
+  return numericFlags(flags, name);
+}
+
+function numericFlags(value, name) {
+  if (!Number.isInteger(value) || value < 0) throw invalidArg(name, value, 'is invalid');
+
+  const unknown = value & ~(ACCESS_MASK | FLAG_BITS);
+  if (unknown !== 0) {
+    throw unsupportedFlags(name, value, `unsupported bits 0x${unknown.toString(16)}`);
+  }
+
+  const access = value & ACCESS_MASK;
+  if (access === ACCESS_MASK) throw unsupportedFlags(name, value, 'invalid access mode');
+
+  const create = (value & constants.O_CREAT) !== 0;
+  const exclusive = (value & constants.O_EXCL) !== 0;
+  const truncate = (value & constants.O_TRUNC) !== 0;
+  const append = (value & constants.O_APPEND) !== 0;
+  const sync = (value & SYNC_BITS) !== 0;
+
+  if (exclusive && !create) throw unsupportedFlags(name, value, 'O_EXCL requires O_CREAT');
+  if (truncate && !create) throw unsupportedFlags(name, value, 'O_TRUNC requires O_CREAT');
+  if (append && !create) throw unsupportedFlags(name, value, 'O_APPEND requires O_CREAT');
+
+  if (access === constants.O_RDONLY) {
+    if (create || append || truncate) {
+      throw unsupportedFlags(name, value, 'read-only access cannot create or truncate');
+    }
+    return sync ? 'rs' : 'r';
+  }
+
+  if (!create) {
+    if (access === constants.O_WRONLY) {
+      throw unsupportedFlags(name, value, 'write-only access requires O_CREAT');
+    }
+    return sync ? 'rs+' : 'r+';
+  }
+
+  if (create && !append && !truncate) {
+    throw unsupportedFlags(name, value, 'O_CREAT requires O_TRUNC or O_APPEND');
+  }
+
+  if (append) {
+    const base = access === constants.O_RDWR ? 'a+' : 'a';
+    if (exclusive) return `${base}x`;
+    return sync ? `as${base === 'a' ? '' : '+'}` : base;
+  }
+
+  if (access === constants.O_RDWR) return exclusive ? 'wx+' : 'w+';
+  return exclusive ? 'wx' : 'w';
+}
+
+/// Write paths share the flag table: `a*` appends through the native append
+/// path, everything else truncates or creates through `writeFile`.
+async function writeWithFlag(path, bytes, flag) {
+  if (!WRITE_FLAG_NAMES.has(flag)) {
+    throw invalidArg('flag', flag, 'is not supported for writing');
+  }
+  const exclusive = flag.includes('x');
+  if (flag[0] === 'a') return native.appendFile(path, bytes, exclusive);
+  return native.writeFile(path, bytes, exclusive);
+}
+
+function entriesFrom(raw, dir, withFileTypes) {
+  if (!withFileTypes) return raw.map((entry) => entry.name);
+  return raw.map((entry) => new Dirent(entry.name, entry.kind, dir));
+}
+
+/// Depth-first walk matching Node's recursive `readdir`: each directory's
+/// sorted entries are emitted before descending, and `rel` is '/'-joined from
+/// the root so returned paths stay relative.
+async function readdirRecursive(root, rel, out, withFileTypes) {
+  const dir = rel === '' ? root : join(root, rel);
+  for (const entry of await native.readdir(dir)) {
+    const childRel = rel === '' ? entry.name : `${rel}/${entry.name}`;
+    out.push(withFileTypes ? new Dirent(entry.name, entry.kind, dir) : childRel);
+    if (entry.kind === 'dir') await readdirRecursive(root, childRel, out, withFileTypes);
+  }
+}
+
+async function openFd(path, flag, mode) {
+  const fd = await native.open(path, flag, mode === undefined ? 0o666 : mode);
   openFds.add(fd);
-  // Every valid append flag contains 'a'; native.open already rejected the rest.
-  if (flags.includes('a')) appendFds.add(fd);
+  if (flag.includes('a')) appendFds.add(fd);
   return fd;
 }
 
@@ -248,11 +342,13 @@ export class Stats {
     this.ino = raw.ino;
     this.mode = raw.mode;
     this.nlink = raw.nlink;
+    // std.Io.File.Stat exposes no uid/gid/rdev, so these stay zero.
     this.uid = 0;
     this.gid = 0;
     this.rdev = 0;
     this.size = raw.size;
-    this.blksize = 4096;
+    this.blksize = raw.blockSize;
+    // Node reports allocated 512-byte blocks; only the size is available here.
     this.blocks = Math.ceil(raw.size / 512);
     this.atimeMs = raw.atimeMs;
     this.mtimeMs = raw.mtimeMs;
@@ -295,9 +391,19 @@ export class Stats {
 }
 
 export class Dirent {
-  constructor(name, kind) {
+  constructor(name, kind, parentPath = '') {
     this.name = name;
+    this.parentPath = parentPath;
     Object.defineProperty(this, '_kind', { value: kind });
+    // Node <= 20 exposed the containing directory as `path`; keep it as a
+    // non-enumerable alias so older callers keep working.
+    Object.defineProperty(this, 'path', {
+      get() {
+        return this.parentPath;
+      },
+      enumerable: false,
+      configurable: true,
+    });
   }
 
   isFile() {
@@ -409,7 +515,8 @@ export const promises = {
   },
 
   async open(path, flags, mode) {
-    return new FileHandle(await openFd(path, flags, mode), flags);
+    const flag = normalizeFlags(flags) ?? 'r';
+    return new FileHandle(await openFd(path, flag, mode), flag);
   },
 
   async readFile(path, options) {
@@ -423,34 +530,13 @@ export const promises = {
   },
 
   async writeFile(path, data, options) {
-    const flag = writeFlag(options);
-    const bytes = toBytes(data);
-
-    if (flag === 'a' || flag === 'ax' || flag === 'a+') {
-      if (flag === 'ax') {
-        await native.access(path, constants.F_OK).then(
-          () => {
-            throw Object.assign(new Error(`EEXIST: file already exists, open '${path}'`), {
-              code: 'EEXIST',
-              syscall: 'open',
-              path,
-            });
-          },
-          () => {},
-        );
-      }
-      return native.appendFile(path, bytes, false);
-    }
-
-    if (flag !== 'w' && flag !== 'wx' && flag !== 'w+' && flag !== 'xw') {
-      throw invalidArg('flag', flag, 'is not supported');
-    }
-
-    return native.writeFile(path, bytes, flag === 'wx' || flag === 'xw');
+    const flag = writeFlag(options) ?? 'w';
+    return writeWithFlag(path, toBytes(data), flag);
   },
 
   async appendFile(path, data, options) {
-    return native.appendFile(path, toBytes(data), false);
+    const flag = writeFlag(options) ?? 'a';
+    return writeWithFlag(path, toBytes(data), flag);
   },
 
   async stat(path) {
@@ -462,15 +548,15 @@ export const promises = {
   },
 
   async readdir(path, options) {
-    if (options && typeof options === 'object' && options.recursive) {
-      const error = new Error('jsz does not implement fs.readdir({ recursive: true })');
-      error.code = 'ERR_METHOD_NOT_IMPLEMENTED';
-      throw error;
-    }
-    const raw = await native.readdir(path);
+    const recursive = !!(options && typeof options === 'object' && options.recursive);
     const withFileTypes = !!(options && typeof options === 'object' && options.withFileTypes);
-    if (withFileTypes) return raw.map((entry) => new Dirent(entry.name, entry.kind));
-    return raw.map((entry) => entry.name);
+    if (!recursive) {
+      const raw = await native.readdir(path);
+      return entriesFrom(raw, path, withFileTypes);
+    }
+    const out = [];
+    await readdirRecursive(path, '', out, withFileTypes);
+    return out;
   },
 
   async mkdir(path, options) {
@@ -510,6 +596,9 @@ export const promises = {
       if (!recursive) {
         const error = new Error(`Cannot copy directory '${src}' without recursive: true`);
         error.code = 'ERR_FS_EISDIR';
+        error.syscall = 'cp';
+        error.path = src;
+        error.dest = dest;
         throw error;
       }
       await promises.mkdir(dest, { recursive: true });
@@ -807,9 +896,10 @@ export function open(path, flags, mode, callback) {
     callback = mode;
     mode = undefined;
   }
-  checkFlags(flags);
+  // Node validates flags synchronously for the callback API.
+  const flag = normalizeFlags(flags) ?? 'r';
   requireCallback(callback);
-  nodeify(openFd(path, flags, mode), callback);
+  nodeify(openFd(path, flag, mode), callback);
 }
 
 export function close(fd, callback) {

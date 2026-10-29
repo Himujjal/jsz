@@ -4,13 +4,19 @@ A small JavaScript runtime written in Zig 0.17 that embeds QuickJS and uses zio 
 
 ## Status
 
-jsz implements Node.js 22 compatibility phases 0-5 from the
+jsz implements Node.js 22 compatibility phases 0-6 from the
 [plan](docs/plan/plan.md): an ESM module loader, async filesystem, `process`,
 `os`, `crypto`, `child_process`, `path`, `url`, `util`, `events`, `Buffer`,
 TCP (`node:net`), `http.createServer`/`http.request`/`http.get`,
 `https.createServer`/`https.request`/`https.get`, and a global
 `fetch`/`Headers`/`Response`/`Request` over vendored dusty 0.5.0. All I/O runs
 on zio tasks while QuickJS stays on the single JS task.
+
+Phase 6 hardened the edges: `console` formatting and timers, `performance`,
+`global`, SIGTERM/SIGHUP handlers, recursive `readdir`, numeric `O_*` flags,
+`dest` fields on two-path errors, `Dirent.parentPath`, job-queue accounting
+guards, `ERR_SERVER_NOT_RUNNING`, `socket.encrypted`, and optional differential
+tests against a local `node` binary.
 
 HTTP responses stream on both sides: the server sends `res.write` chunks as they
 arrive with a 64 KiB high-water mark driving `drain` backpressure, and client
@@ -50,9 +56,9 @@ mise run test
 | Area | Surface |
 | --- | --- |
 | Modules | ESM `import`/`export`, `node:` and bare builtin specifiers, `import.meta`, dynamic `import()` |
-| Filesystem | `fs`/`fs/promises` async callbacks and promises; no `*Sync` or `fs.watch` |
-| Process | `process.argv`, `env`, `cwd`, `chdir`, `exit`, `hrtime`, `stdout`/`stderr`, signals, `uncaughtException` |
-| Runtime | `console`, timers, `queueMicrotask`, native Promises, `Buffer`, `TextEncoder`/`TextDecoder`, `atob`/`btoa`, `URL`, `URLSearchParams` |
+| Filesystem | `fs`/`fs/promises` async callbacks and promises, including recursive `readdir`, numeric `O_*` flags, `Stats`/`Dirent`; no `*Sync`, `fs.opendir`, or `fs.watch` |
+| Process | `process.argv`, `env`, `cwd`, `chdir`, `exit`, `hrtime`, `stdout`/`stderr` (`fd` 1/2), SIGINT/SIGTERM/SIGHUP, `uncaughtException` |
+| Runtime | `console` (formatting, `dir`, `trace`, `time`), timers, `queueMicrotask`, native Promises, `performance`, `global`, `Buffer`, `TextEncoder`/`TextDecoder`, `atob`/`btoa`, `URL`, `URLSearchParams` |
 | System | `os`, `crypto` (hash, HMAC, random), `path` (posix + win32), `util`, `events`, `child_process` |
 | Network | `net.createServer`/`net.connect` (TCP), `http.createServer`/`http.request`/`http.get`, `https.createServer`/`https.request`/`https.get`, global `fetch`, `Headers`, `Response`, `Request` |
 
@@ -64,6 +70,28 @@ caller-supplied reason phrase, and so the client parser accepts status codes its
 and fetch work runs in zio tasks and completes through the event loop.
 
 Timer delays are clamped to 2,147,483,647 ms. A timer callback must be a function.
+
+### Compatibility notes
+
+- `fs` is async-only. `*Sync` names throw `ERR_METHOD_NOT_IMPLEMENTED` naming the
+  async alternative, and `existsSync` is not exported.
+- Numeric `fs.constants.O_*` flags are accepted because they are translated to
+  the string flags the driver supports. `O_SYNC`/`O_DSYNC` are accepted in a
+  mask but are not honored; `a`/`a+` appends with a stat-then-write rather than
+  an atomic `O_APPEND`.
+- `Stats.uid`, `gid`, `dev`, and `rdev` are `0` because `std.Io.File.Stat` does
+  not expose them; `birthtime` falls back to `ctime`.
+- Recursive `readdir` joins nested names with `/` and sets
+  `Dirent.parentPath` (with the older `dirent.path` alias).
+- `net.Server.close()` stops accepting and does not wait for accepted sockets;
+  `http.Server.close()` drains in-flight responses. Closing a server that never
+  listened reports `ERR_SERVER_NOT_RUNNING`.
+- `socket.encrypted` is `true` on HTTPS server requests and client responses and
+  `false` on plain HTTP/TCP sockets.
+- Unhandled promise rejections print `UnhandledPromiseRejectionWarning` and exit
+  `1`; Node 22 throws `ERR_UNHANDLED_REJECTION` by default.
+- `process.nextTick` shares QuickJS's single job queue with promise reactions,
+  so Node's nextTick-before-promise ordering is not guaranteed.
 
 ## Example
 

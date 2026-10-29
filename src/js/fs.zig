@@ -370,8 +370,8 @@ fn symlink(ctx_opt: ?*quickjs.Context, _: Value, args: []const quickjs.c.JSValue
 
     return submitJob(host, ctx, .{
         .op = .symlink,
-        .path = link_path,
-        .path2 = target,
+        .path = target,
+        .path2 = link_path,
         .path2_owned = true,
     });
 }

@@ -29,4 +29,5 @@ test {
     _ = @import("http_test.zig");
     _ = @import("fetch_test.zig");
     _ = @import("pkcs12_test.zig");
+    _ = @import("differential_test.zig");
 }

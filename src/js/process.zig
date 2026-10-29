@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const quickjs = @import("quickjs");
 const zio = @import("zio");
 const Host = @import("host.zig").Host;
+const SignalKind = @import("../event_loop.zig").SignalKind;
 const value_mod = @import("value.zig");
 
 const Value = quickjs.Value;
@@ -198,7 +199,6 @@ fn setHook(
     const slot = &@field(host.loop.*, field);
     if (slot.*) |previous| previous.deinit(ctx);
     slot.* = listener.dup(ctx);
-    if (comptime std.mem.eql(u8, field, "sigint_hook")) host.loop.sigint_wanted = true;
     return .undefined;
 }
 
@@ -221,14 +221,37 @@ fn clearExitHook(ctx_opt: ?*quickjs.Context, _: Value, _: []const quickjs.c.JSVa
     return clearHook(ctx, "exit_hook");
 }
 
-fn setSigintHook(ctx_opt: ?*quickjs.Context, _: Value, args: []const quickjs.c.JSValue) Value {
+fn setSignalHook(ctx_opt: ?*quickjs.Context, _: Value, args: []const quickjs.c.JSValue) Value {
     const ctx = ctx_opt orelse return .undefined;
-    return setHook(ctx, args, "sigint_hook");
+    const host = hostOf(ctx) orelse return .undefined;
+
+    const name = argString(host, ctx, args, 0, "signal") orelse return .undefined;
+    defer host.allocator.free(name);
+    const kind = SignalKind.fromLabel(name) orelse {
+        _ = ctx.throwTypeError("The \"signal\" argument must be one of SIGINT, SIGTERM, or SIGHUP");
+        return .undefined;
+    };
+
+    const listener = argValue(args, 1);
+    if (!listener.isFunction(ctx)) {
+        _ = ctx.throwTypeError("The \"listener\" argument must be of type function");
+        return .undefined;
+    }
+
+    host.loop.setSignalHook(kind, listener);
+    return .undefined;
 }
 
-fn clearSigintHook(ctx_opt: ?*quickjs.Context, _: Value, _: []const quickjs.c.JSValue) Value {
+fn clearSignalHook(ctx_opt: ?*quickjs.Context, _: Value, args: []const quickjs.c.JSValue) Value {
     const ctx = ctx_opt orelse return .undefined;
-    return clearHook(ctx, "sigint_hook");
+    const host = hostOf(ctx) orelse return .undefined;
+
+    const name = argString(host, ctx, args, 0, "signal") orelse return .undefined;
+    defer host.allocator.free(name);
+    const kind = SignalKind.fromLabel(name) orelse return .undefined;
+
+    host.loop.clearSignalHook(kind);
+    return .undefined;
 }
 
 fn setUncaughtHook(ctx_opt: ?*quickjs.Context, _: Value, args: []const quickjs.c.JSValue) Value {
@@ -517,8 +540,8 @@ const module_exports = [_]Export{
     .{ .name = "setExitCode", .func = setExitCode, .nargs = 1 },
     .{ .name = "setExitHook", .func = setExitHook, .nargs = 1 },
     .{ .name = "clearExitHook", .func = clearExitHook, .nargs = 0 },
-    .{ .name = "setSigintHook", .func = setSigintHook, .nargs = 1 },
-    .{ .name = "clearSigintHook", .func = clearSigintHook, .nargs = 0 },
+    .{ .name = "setSignalHook", .func = setSignalHook, .nargs = 2 },
+    .{ .name = "clearSignalHook", .func = clearSignalHook, .nargs = 1 },
     .{ .name = "setUncaughtHook", .func = setUncaughtHook, .nargs = 1 },
     .{ .name = "clearUncaughtHook", .func = clearUncaughtHook, .nargs = 0 },
     .{ .name = "pid", .func = pid, .nargs = 0 },

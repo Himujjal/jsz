@@ -400,6 +400,8 @@ function formatArray(value, ctx, depth, indent) {
       else entries.push('<1 empty item>');
     }
     if (value.length > max) entries.push(moreItems(value.length - max));
+    // `showHidden` exposes the array's own non-enumerable `length`, as Node does.
+    if (ctx.opts.showHidden) entries.push(`[length]: ${value.length}`);
 
     const name = constructorName(value);
     const header = name && name !== 'Array' ? `${name}(${value.length}) ` : '';
@@ -650,7 +652,8 @@ function format(...args) {
         out += formatJson(value);
         break;
       case 'o':
-        out += inspect(value, { showHidden: true, depth: 4, compact: false });
+        // Node keeps `%o` compact; only `showHidden` differs from `%O`.
+        out += inspect(value, { showHidden: true, depth: 4 });
         break;
       case 'O':
         out += inspect(value, { depth: 4 });

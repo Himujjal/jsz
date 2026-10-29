@@ -346,19 +346,23 @@ test "promise continuations run when fs work settles at loop exhaustion" {
     try std.testing.expectEqualStrings("done", result);
 }
 
-const SigintResult = struct {
+const SignalResult = struct {
     term: std.process.Child.Term,
     stdout: []u8,
 
-    fn deinit(self: SigintResult, allocator: std.mem.Allocator) void {
+    fn deinit(self: SignalResult, allocator: std.mem.Allocator) void {
         allocator.free(self.stdout);
     }
 };
 
-/// Runs a fixture with stdout captured in a file, sends SIGINT after the
+/// Runs a fixture with stdout captured in a file, sends `signal` after the
 /// listener had time to install, and reaps the child. The fixture's own guard
 /// timer keeps a broken watcher from hanging the test.
-fn runWithSigint(allocator: std.mem.Allocator, name: []const u8) !SigintResult {
+fn runWithSignal(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    signal: std.posix.SIG,
+) !SignalResult {
     const script = try std.fs.path.resolveAlloc(allocator, &.{ helpers.fixture_dir, name });
     defer allocator.free(script);
 
@@ -378,7 +382,7 @@ fn runWithSigint(allocator: std.mem.Allocator, name: []const u8) !SigintResult {
 
     const term = blk: {
         const pid = child.id orelse return error.MissingChildPid;
-        try std.posix.kill(pid, std.posix.SIG.INT);
+        try std.posix.kill(pid, signal);
         break :blk try child.wait(std.testing.io);
     };
 
@@ -400,7 +404,7 @@ fn expectCleanExit(term: std.process.Child.Term, expected: u8) !void {
 
 test "SIGINT runs the JS listener and keeps the loop alive" {
     const allocator = std.testing.allocator;
-    const result = try runWithSigint(allocator, "process/sigint.js");
+    const result = try runWithSignal(allocator, "process/sigint.js", std.posix.SIG.INT);
     defer result.deinit(allocator);
 
     try expectCleanExit(result.term, 0);
@@ -409,9 +413,84 @@ test "SIGINT runs the JS listener and keeps the loop alive" {
 
 test "SIGINT without a listener exits 130" {
     const allocator = std.testing.allocator;
-    const result = try runWithSigint(allocator, "process/sigint-default.js");
+    const result = try runWithSignal(allocator, "process/sigint-default.js", std.posix.SIG.INT);
     defer result.deinit(allocator);
 
     try expectCleanExit(result.term, 130);
     try std.testing.expectEqualStrings("ready\n", result.stdout);
+}
+
+test "SIGTERM runs the JS listener with the signal name" {
+    const allocator = std.testing.allocator;
+    const result = try runWithSignal(allocator, "process/sigterm.js", std.posix.SIG.TERM);
+    defer result.deinit(allocator);
+
+    try expectCleanExit(result.term, 0);
+    try std.testing.expectEqualStrings("ready\nSIGTERM\nafter\n", result.stdout);
+}
+
+test "SIGTERM without a listener exits 143" {
+    const allocator = std.testing.allocator;
+    const result = try runWithSignal(allocator, "process/sigterm-default.js", std.posix.SIG.TERM);
+    defer result.deinit(allocator);
+
+    try expectCleanExit(result.term, 143);
+    try std.testing.expectEqualStrings("ready\n", result.stdout);
+}
+
+test "SIGHUP without a listener exits 129" {
+    const allocator = std.testing.allocator;
+    const result = try runWithSignal(allocator, "process/sighup-default.js", std.posix.SIG.HUP);
+    defer result.deinit(allocator);
+
+    try expectCleanExit(result.term, 129);
+    try std.testing.expectEqualStrings("ready\n", result.stdout);
+}
+
+test "process.stdout and process.stderr expose their descriptor numbers" {
+    const allocator = std.testing.allocator;
+    const result = try helpers.runFixtureProcess(allocator, "process/stream-fds.js", .{});
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqualStrings(
+        \\stdout=1
+        \\stderr=2
+        \\stdin=true
+        \\
+    , result.stdout);
+}
+
+test "performance.now advances and timeOrigin is a stable anchor" {
+    const allocator = std.testing.allocator;
+    const result = try helpers.runFixtureProcess(allocator, "process/performance.js", .{});
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqualStrings(
+        \\global=true
+        \\advances=true
+        \\origin=true
+        \\constant=true
+        \\
+    , result.stdout);
+}
+
+test "console extras format, inspect, and warn like Node" {
+    const allocator = std.testing.allocator;
+    const result = try helpers.runFixtureProcess(allocator, "process/console-extras.js", .{});
+    defer result.deinit(allocator);
+
+    const expected_prefix =
+        \\a|1|2|3|{"k":1}|%
+        \\plain
+        \\multi 1 true
+        \\info
+        \\warn
+        \\err
+        \\debug
+        \\{ a: 1 }
+        \\Warning: No such label 'missing' for console.timeEnd()
+        \\t: 
+    ;
+    try std.testing.expect(std.mem.startsWith(u8, result.stdout, expected_prefix));
+    try std.testing.expect(std.mem.endsWith(u8, result.stdout, "ms\n"));
 }

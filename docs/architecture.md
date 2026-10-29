@@ -70,7 +70,7 @@ Arrows show calls and ownership. QuickJS invokes the installed C callbacks; each
 - `src/cli/cli.zig` parses arguments, creates one shared stdout writer, starts the runtime, and dispatches to script, eval, or REPL mode.
 - `src/runtime.zig` owns the zio Runtime, the QuickJS Runtime and Context, the EventLoop, an output buffer, and an optional `std.Io.Writer`.
 - `src/event_loop.zig` schedules timers, drains QuickJS jobs, and enforces run limits.
-- `src/js/builtins.zig` installs `setTimeout`, `clearTimeout`, `setInterval`, `clearInterval`, `sleep`, `console.log`, and `console.error` on the global object.
+- `src/js/builtins.zig` installs the native `setTimeout`, `clearTimeout`, `setInterval`, `clearInterval`, `sleep`, `console.log`, and `console.error` before the embedded `bootstrap.js` module installs the Node-shaped globals (`console`, `performance`, `global`, `process`, `Buffer`, `URL`, `fetch`, and friends).
 - `src/js/host.zig` defines the `Host` struct: allocator, QuickJS context, event loop pointer, and output buffer pointer. A `*Host` is stored in the QuickJS context opaque pointer, so C callbacks can reach runtime state without circular imports.
 
 The public operations on an initialized runtime are `eval`, `evalFile`, `run`, `tick`, `flush`, `appendValue`, `context`, and `deinit`. `appendValue` converts a value with JavaScript `toString` and appends it plus a newline to the output buffer. `Options` accepts `max_runtime_ms`, `max_iterations`, and an optional `writer`.
@@ -83,7 +83,7 @@ The shared stdout writer is required because each `std.Io.File.stdout()` writer 
 
 - `src/js/timers.zig` converts the delay argument to a number. `undefined`, `null`, `NaN`, and non-positive values become 0; larger values are clamped to 2,147,483,647 ms. It validates that the callback is a function, duplicates the extra arguments into an owned slice, schedules the timer, and returns the timer id as an integer. `clearTimeout` and `clearInterval` convert the first argument to an unsigned 32-bit integer and call `EventLoop.cancel`.
 - `src/js/promises.zig` creates a QuickJS promise capability and schedules its resolve and reject functions with the event loop.
-- `src/js/console.zig` formats each argument with JavaScript `toString`, separates arguments with a space, and appends a newline to the runtime output buffer. `console.error` uses the same write path as `console.log`.
+- `src/js/console.zig` is the native writer: it formats each argument with JavaScript `toString`, separates arguments with a space, and appends a newline to the runtime output buffer. `console.error` uses the same write path as `console.log`. `src/builtins/console.js` wraps those writers, formats through `util.format`, and adds `info`/`warn`/`debug`/`trace`/`dir`/`assert`/`time`/`timeEnd`; it replaces the global during bootstrap.
 
 ## Lifecycle
 
@@ -94,7 +94,7 @@ The shared stdout writer is required because each `std.Io.File.stdout()` writer 
 3. `jsz.Runtime.init(init.gpa, .{ .writer = &stdout.interface })` allocates the runtime and initializes, in order, the zio Runtime, QuickJS Runtime, QuickJS Context, and EventLoop.
 4. The runtime points `loop.sink` at its output buffer and applies the optional `max_iterations` and `max_runtime_ms` options.
 5. It fills the `Host` struct and stores it with `ctx.setOpaque(Host, &self.host)`.
-6. `builtins.register(&self.host)` installs the global functions and the `console` object.
+6. `builtins.register(&self.host)` installs the native functions and writer object; evaluating the embedded `bootstrap.js` then installs the public globals over them.
 
 ### Evaluation
 

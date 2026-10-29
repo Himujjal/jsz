@@ -69,6 +69,39 @@ test "descriptor fs fixture" {
     , actual);
 }
 
+test "fs hardening fixture" {
+    const actual = try helpers.runFixtureStdout(std.testing.allocator, "fs/hardening.js");
+    defer std.testing.allocator.free(actual);
+
+    try std.testing.expectEqualStrings(
+        \\recursive=a.txt,sub,sub/b.txt,sub/deep,sub/deep/c.txt
+        \\recursive-root=false
+        \\typed=a.txt@tests/fixtures/.fs-hardening-work,sub@tests/fixtures/.fs-hardening-work,b.txt@tests/fixtures/.fs-hardening-work/sub,deep@tests/fixtures/.fs-hardening-work/sub,c.txt@tests/fixtures/.fs-hardening-work/sub/deep
+        \\typed-basename=true
+        \\typed-path-alias=true:false
+        \\callback-recursive=true
+        \\flat-parent=true:true
+        \\numeric-write=onetwo
+        \\numeric-truncate=reset
+        \\numeric-exclusive=EEXIST:reset
+        \\numeric-open=num
+        \\numeric-callback=resetcb
+        \\numeric-invalid=ERR_INVALID_ARG_VALUE,ERR_INVALID_ARG_VALUE,ERR_INVALID_ARG_VALUE,ERR_INVALID_ARG_VALUE,ERR_INVALID_ARG_VALUE
+        \\numeric-invalid-write=ERR_INVALID_ARG_VALUE:resetcb
+        \\numeric-invalid-sync=ERR_INVALID_ARG_VALUE
+        \\append-seq=base123
+        \\append-numeric=base12345
+        \\rename-dest=ENOENT|rename|tests/fixtures/.fs-hardening-work/absent.txt|tests/fixtures/.fs-hardening-work/moved.txt
+        \\copy-dest=ENOENT|copyfile|tests/fixtures/.fs-hardening-work/absent.txt|tests/fixtures/.fs-hardening-work/copy.txt
+        \\link-dest=ENOENT|link|tests/fixtures/.fs-hardening-work/absent.txt|tests/fixtures/.fs-hardening-work/hard.txt
+        \\cp-dest=ERR_FS_EISDIR|cp|tests/fixtures/.fs-hardening-work/sub|tests/fixtures/.fs-hardening-work/subcopy
+        \\symlink-dest=EEXIST|symlink|a.txt|tests/fixtures/.fs-hardening-work/sym.txt
+        \\stat-block=true:true:true
+        \\cleanup=true
+        \\
+    , actual);
+}
+
 test "mkdtemp creates a real directory outside a fixture" {
     const runtime = try helpers.initRuntime(null);
     defer runtime.deinit();

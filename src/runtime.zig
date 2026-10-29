@@ -2,6 +2,7 @@ const std = @import("std");
 const quickjs = @import("quickjs");
 const zio = @import("zio");
 const EventLoop = @import("event_loop.zig").EventLoop;
+const SignalKind = @import("event_loop.zig").SignalKind;
 const Fs = @import("fs.zig").Fs;
 const ChildProcesses = @import("child_process.zig").ChildProcesses;
 const Net = @import("net.zig").Net;
@@ -40,7 +41,9 @@ pub const Runtime = struct {
     writer: ?*std.Io.Writer = null,
     env_owned: ?std.process.Environ.Map = null,
     entry_owned: ?[]u8 = null,
-    sigint_handle: ?zio.JoinHandle(void) = null,
+    /// One watcher per signal kind; each is cancelled before shutdown so zio
+    /// restores the previous OS handler.
+    signal_handles: [SignalKind.count]?zio.JoinHandle(void) = @splat(null),
     shutdown_done: bool = false,
     had_error: bool = false,
 
@@ -124,7 +127,7 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Runtime) void {
-        self.stopSigintWatcher();
+        self.stopSignalWatchers();
         self.finish();
         self.flush() catch {};
         self.host.deinitCwd();
@@ -286,22 +289,34 @@ pub const Runtime = struct {
     }
 
     pub fn run(self: *Runtime) !void {
-        if (self.loop.sigint_wanted and self.sigint_handle == null) {
-            self.sigint_handle = try self.zio_rt.spawn(waitForSigint, .{&self.loop});
-        }
+        try self.startSignalWatchers();
 
         const result = self.loop.run();
-        self.stopSigintWatcher();
+        self.stopSignalWatchers();
         if (result) |_| {} else |_| self.had_error = true;
         self.finish();
         try self.flush();
         return result;
     }
 
-    fn stopSigintWatcher(self: *Runtime) void {
-        if (self.sigint_handle) |*handle| {
-            handle.cancel();
-            self.sigint_handle = null;
+    fn startSignalWatchers(self: *Runtime) !void {
+        inline for (@typeInfo(SignalKind).@"enum".field_values) |value| {
+            const kind: SignalKind = @fromBackingInt(@intCast(value));
+            const index = @backingInt(kind);
+            if (self.loop.signal_wanted[index] and self.signal_handles[index] == null) {
+                self.signal_handles[index] = try self.zio_rt.spawn(waitForSignal, .{ &self.loop, kind });
+            }
+        }
+    }
+
+    /// Cancelling makes `wait` return `error.Canceled`, which restores zio's
+    /// saved handler before the runtime disappears.
+    fn stopSignalWatchers(self: *Runtime) void {
+        for (&self.signal_handles) |*slot| {
+            if (slot.*) |*handle| {
+                handle.cancel();
+                slot.* = null;
+            }
         }
     }
 
@@ -353,15 +368,15 @@ pub const Runtime = struct {
     }
 };
 
-/// Runs on a zio task; it only sets a flag and wakes the queue, never touches
-/// QuickJS.
-fn waitForSigint(loop: *EventLoop) void {
-    var signal = zio.Signal.init(.interrupt) catch return;
+/// Runs on a zio task; it only records the signal and wakes the queue, never
+/// touches QuickJS.
+fn waitForSignal(loop: *EventLoop, kind: SignalKind) void {
+    var signal = zio.Signal.init(kind.zioKind()) catch return;
     defer signal.deinit();
 
     while (true) {
         signal.wait() catch return;
-        loop.interrupt();
+        loop.notifySignal(kind);
     }
 }
 

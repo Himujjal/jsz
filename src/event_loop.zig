@@ -8,6 +8,52 @@ const UnhandledRejection = struct {
     reason: quickjs.Value,
 };
 
+/// Signals the runtime watches. The enum value is also the pending bit index.
+pub const SignalKind = enum(u8) {
+    interrupt,
+    terminate,
+    hangup,
+
+    pub const count = @typeInfo(SignalKind).@"enum".field_names.len;
+
+    /// Node exits with 128+signum when no listener is registered.
+    pub fn number(self: SignalKind) u8 {
+        return switch (self) {
+            .interrupt => 2,
+            .terminate => 15,
+            .hangup => 1,
+        };
+    }
+
+    pub fn label(self: SignalKind) [:0]const u8 {
+        return switch (self) {
+            .interrupt => "SIGINT",
+            .terminate => "SIGTERM",
+            .hangup => "SIGHUP",
+        };
+    }
+
+    pub fn fromLabel(name: []const u8) ?SignalKind {
+        inline for (@typeInfo(SignalKind).@"enum".field_values) |value| {
+            const kind: SignalKind = @fromBackingInt(@intCast(value));
+            if (std.mem.eql(u8, kind.label(), name)) return kind;
+        }
+        return null;
+    }
+
+    pub fn zioKind(self: SignalKind) zio.SignalKind {
+        return switch (self) {
+            .interrupt => .interrupt,
+            .terminate => .terminate,
+            // Windows console control events have no hangup equivalent.
+            .hangup => if (comptime @hasField(zio.SignalKind, "hangup"))
+                @field(zio.SignalKind, "hangup")
+            else
+                .terminate,
+        };
+    }
+};
+
 pub const Timer = struct {
     id: u64,
     deadline_ns: u64,
@@ -40,16 +86,17 @@ pub const EventLoop = struct {
     exit_code: u8 = 0,
     /// `process.on('exit')` trampoline; runs once before shutdown.
     exit_hook: ?quickjs.Value = null,
-    /// `process.on('SIGINT')` trampoline; null means exit 130.
-    sigint_hook: ?quickjs.Value = null,
+    /// `process.on('SIGINT'|'SIGTERM'|'SIGHUP')` trampolines, indexed by
+    /// `@intFromEnum(SignalKind)`; null means exit 128+signum.
+    signal_hooks: [SignalKind.count]?quickjs.Value = @splat(null),
     /// `process.on('uncaughtException')` trampoline; null keeps the old
     /// report-and-fail behavior.
     uncaught_hook: ?quickjs.Value = null,
-    /// A watcher is always wanted: it turns SIGINT into exit 130 when no JS
-    /// listener exists (background children inherit SIGINT ignored).
-    sigint_wanted: bool = true,
-    /// Written by the zio signal task, consumed by the JS task.
-    interrupted: std.atomic.Value(bool) = .init(false),
+    /// A watcher is always wanted: it turns a signal into Node's default exit
+    /// code when no JS listener exists.
+    signal_wanted: [SignalKind.count]bool = @splat(true),
+    /// Bitmask written by the zio signal tasks, consumed by the JS task.
+    pending_signals: std.atomic.Value(u8) = .init(0),
     /// Rejected promises that had no handler when the job queue drained.
     rejections: std.ArrayList(UnhandledRejection) = .empty,
     exit_hooks_ran: bool = false,
@@ -74,7 +121,9 @@ pub const EventLoop = struct {
         self.timers.deinit();
 
         if (self.exit_hook) |hook| hook.deinit(self.ctx);
-        if (self.sigint_hook) |hook| hook.deinit(self.ctx);
+        for (self.signal_hooks) |maybe_hook| {
+            if (maybe_hook) |hook| hook.deinit(self.ctx);
+        }
         if (self.uncaught_hook) |hook| hook.deinit(self.ctx);
         for (self.rejections.items) |entry| {
             entry.promise.deinit(self.ctx);
@@ -151,27 +200,65 @@ pub const EventLoop = struct {
         self.stopped = true;
     }
 
-    /// Called by the zio signal task. Wakes a blocked loop without touching
-    /// QuickJS; the JS task handles the signal on its next iteration.
-    pub fn interrupt(self: *EventLoop) void {
-        self.interrupted.store(true, .release);
+    /// Called by a zio signal task. Only records the signal and wakes a blocked
+    /// loop; the JS task runs the listener on its next iteration.
+    pub fn notifySignal(self: *EventLoop, kind: SignalKind) void {
+        const bit: u8 = @as(u8, 1) << @as(u3, @intCast(@backingInt(kind)));
+        _ = self.pending_signals.fetchOr(bit, .release);
         if (self.queue) |queue| queue.notify();
     }
 
-    fn takeInterrupt(self: *EventLoop) bool {
-        return self.interrupted.swap(false, .acquire);
+    /// Installs the JS trampoline for `kind`, replacing any previous one.
+    pub fn setSignalHook(self: *EventLoop, kind: SignalKind, listener: quickjs.Value) void {
+        const index = @backingInt(kind);
+        if (self.signal_hooks[index]) |previous| previous.deinit(self.ctx);
+        self.signal_hooks[index] = listener.dup(self.ctx);
+        self.signal_wanted[index] = true;
     }
 
-    fn handleSigint(self: *EventLoop) void {
-        const hook = self.sigint_hook orelse {
-            self.exit_code = 130;
-            self.stopped = true;
-            return;
-        };
+    pub fn clearSignalHook(self: *EventLoop, kind: SignalKind) void {
+        const index = @backingInt(kind);
+        if (self.signal_hooks[index]) |hook| hook.deinit(self.ctx);
+        self.signal_hooks[index] = null;
+    }
 
-        const result = hook.call(self.ctx, .undefined, &.{});
-        defer result.deinit(self.ctx);
-        if (result.isException()) _ = self.handleUncaught();
+    /// True while any default-exit watcher must stay armed; the loop then waits
+    /// on the queue instead of sleeping so a signal can wake it.
+    pub fn signalsWatched(self: *EventLoop) bool {
+        for (self.signal_wanted) |wanted| {
+            if (wanted) return true;
+        }
+        return false;
+    }
+
+    /// Runs every pending signal's listener in delivery order, or stops with
+    /// Node's default code when none is registered.
+    fn handleSignals(self: *EventLoop) void {
+        const mask = self.pending_signals.swap(0, .acquire);
+        if (mask == 0) return;
+        // `notify` leaves its wake flag set; consuming it keeps later waits
+        // blocking instead of spinning the loop.
+        if (self.queue) |queue| _ = queue.takeWake();
+
+        var index: usize = 0;
+        while (index < SignalKind.count) : (index += 1) {
+            const bit: u8 = @as(u8, 1) << @as(u3, @intCast(index));
+            if (mask & bit == 0) continue;
+
+            const kind: SignalKind = @fromBackingInt(@intCast(index));
+            const hook = self.signal_hooks[index] orelse {
+                self.exit_code = 128 + kind.number();
+                self.stopped = true;
+                return;
+            };
+
+            const argument = quickjs.Value.initString(self.ctx, kind.label());
+            defer argument.deinit(self.ctx);
+            const result = hook.call(self.ctx, .undefined, &.{argument});
+            defer result.deinit(self.ctx);
+            if (result.isException()) _ = self.handleUncaught();
+            if (self.stopped) return;
+        }
     }
 
     /// Runs `process.on('exit')` once, in registration order (the JS trampoline
@@ -273,10 +360,8 @@ pub const EventLoop = struct {
     pub fn run(self: *EventLoop) !void {
         while (!self.stopped) {
             try self.checkLimits();
-            if (self.takeInterrupt()) {
-                self.handleSigint();
-                if (self.stopped) break;
-            }
+            self.handleSignals();
+            if (self.stopped) break;
             self.drainJobs() catch |err| {
                 self.failed = true;
                 return err;
@@ -301,7 +386,7 @@ pub const EventLoop = struct {
                 if (next > current) {
                     if (queue_pending) {
                         self.queue.?.wait(next - current);
-                    } else if (self.sigint_wanted) {
+                    } else if (self.signalsWatched()) {
                         // The queue is the only wait a zio signal task can wake.
                         self.waitForWake(next - current);
                     } else {

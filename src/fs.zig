@@ -121,6 +121,7 @@ pub const StatData = struct {
     mode: u32,
     ino: u64,
     nlink: u64,
+    block_size: u32,
     atime_ms: f64,
     mtime_ms: f64,
     ctime_ms: f64,
@@ -286,7 +287,7 @@ pub const Fs = struct {
                     try cwd.writeFile(self.io, .{
                         .sub_path = job.path,
                         .data = combined,
-                        .flags = .{ .truncate = true },
+                        .flags = .{ .truncate = true, .exclusive = job.exclusive },
                     });
                 } else {
                     try cwd.writeFile(self.io, .{
@@ -382,7 +383,7 @@ pub const Fs = struct {
                 return .{ .path = try self.allocator.dupeSentinel(u8, buffer[0..len], 0) };
             },
             .symlink => {
-                try cwd.symLink(self.io, job.path2, job.path, .{});
+                try cwd.symLink(self.io, job.path, job.path2, .{});
                 return .none;
             },
             .truncate => {
@@ -601,6 +602,7 @@ fn statData(stat: std.Io.File.Stat) StatData {
         .mode = kindMode(stat.kind) | @as(u32, @backingInt(stat.permissions)),
         .ino = @intCast(stat.inode),
         .nlink = @intCast(stat.nlink),
+        .block_size = stat.block_size,
         .atime_ms = if (stat.atime) |atime| @floatFromInt(atime.toMilliseconds()) else 0,
         .mtime_ms = @floatFromInt(stat.mtime.toMilliseconds()),
         .ctime_ms = @floatFromInt(stat.ctime.toMilliseconds()),
@@ -664,6 +666,7 @@ fn statValue(ctx: *quickjs.Context, stat: StatData) !quickjs.Value {
     try object.setPropertyStr(ctx, "mode", quickjs.Value.initInt64(@intCast(stat.mode)));
     try object.setPropertyStr(ctx, "ino", quickjs.Value.initFloat64(@floatFromInt(stat.ino)));
     try object.setPropertyStr(ctx, "nlink", quickjs.Value.initFloat64(@floatFromInt(stat.nlink)));
+    try object.setPropertyStr(ctx, "blockSize", quickjs.Value.initInt64(@intCast(stat.block_size)));
     try object.setPropertyStr(ctx, "atimeMs", quickjs.Value.initFloat64(stat.atime_ms));
     try object.setPropertyStr(ctx, "mtimeMs", quickjs.Value.initFloat64(stat.mtime_ms));
     try object.setPropertyStr(ctx, "ctimeMs", quickjs.Value.initFloat64(stat.ctime_ms));
@@ -702,7 +705,16 @@ fn kindName(kind: std.Io.File.Kind) [:0]const u8 {
 fn makeError(ctx: *quickjs.Context, code: ErrorCode, job: *Job) quickjs.Value {
     var buffer: [1024]u8 = undefined;
     const has_path = job.path.len > 0;
-    const message: []const u8 = if (has_path)
+    // Two-path operations carry the destination in `path2`; Node reports it as
+    // `dest` (and as `'path' -> 'dest'` in the message).
+    const has_dest = job.path2.len > 0;
+    const message: []const u8 = if (has_path and has_dest)
+        std.fmt.bufPrint(
+            &buffer,
+            "{s}: {s}, {s} '{s}' -> '{s}'",
+            .{ code.text(), code.message(), opSyscall(job.op), job.path, job.path2 },
+        ) catch code.message()
+    else if (has_path)
         std.fmt.bufPrint(
             &buffer,
             "{s}: {s}, {s} '{s}'",
@@ -744,6 +756,9 @@ fn makeError(ctx: *quickjs.Context, code: ErrorCode, job: *Job) quickjs.Value {
     error_object.setPropertyStr(ctx, "syscall", quickjs.Value.initString(ctx, opSyscall(job.op))) catch {};
     if (has_path) {
         error_object.setPropertyStr(ctx, "path", quickjs.Value.initStringLen(ctx, job.path)) catch {};
+    }
+    if (has_dest) {
+        error_object.setPropertyStr(ctx, "dest", quickjs.Value.initStringLen(ctx, job.path2)) catch {};
     }
     return error_object;
 }

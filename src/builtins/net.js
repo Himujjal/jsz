@@ -109,6 +109,8 @@ class Socket extends EventEmitter {
     this.destroyed = false;
     this.readable = true;
     this.writable = true;
+    // Plain TCP only; `node:tls` would own the true case.
+    this.encrypted = false;
     this.pending = false;
     this.remoteAddress = undefined;
     this.remotePort = undefined;
@@ -366,7 +368,8 @@ class Server extends EventEmitter {
     this.destroyed = false;
     this.maxConnections = undefined;
     this._closeCallbacks = [];
-    /// Live sockets accepted by this server; `close()` waits for them.
+    /// Live sockets accepted by this server; `getConnections` reports the count.
+    /// `close()` does not wait for them, unlike Node.
     this._connections = new Set();
 
     if (typeof options === 'function') {

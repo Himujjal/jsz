@@ -24,6 +24,7 @@ pub const builtin_list = [_]Builtin{
     .{ .name = "node:_encoding", .source = "", .native = true },
     .{ .name = "node:buffer", .source = @embedFile("builtins/buffer.js") },
     .{ .name = "node:util", .source = @embedFile("builtins/util.js") },
+    .{ .name = "node:console", .source = @embedFile("builtins/console.js") },
     .{ .name = "node:_fs", .source = "", .native = true },
     .{ .name = "node:fs", .source = @embedFile("builtins/fs.js") },
     .{ .name = "node:fs/promises", .source = @embedFile("builtins/fs_promises.js") },

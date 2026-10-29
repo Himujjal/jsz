@@ -15,6 +15,47 @@ test "http server fixture" {
     , actual);
 }
 
+test "http server close before listen reports ERR_SERVER_NOT_RUNNING" {
+    const actual = try helpers.runFixtureStdout(std.testing.allocator, "http/close_not_running.mjs");
+    defer std.testing.allocator.free(actual);
+    try std.testing.expectEqualStrings(
+        \\event never
+        \\never ERR_SERVER_NOT_RUNNING
+        \\never-listening false true
+        \\event closed
+        \\again ERR_SERVER_NOT_RUNNING
+        \\listening true
+        \\closed
+        \\event after-run
+        \\after-run ERR_SERVER_NOT_RUNNING
+        \\
+    , actual);
+}
+
+test "http socket.encrypted is false on plain requests" {
+    const actual = try helpers.runFixtureStdout(std.testing.allocator, "http/encrypted.mjs");
+    defer std.testing.allocator.free(actual);
+    try std.testing.expectEqualStrings(
+        \\client false true
+        \\server false true
+        \\body ok
+        \\closed
+        \\
+    , actual);
+}
+
+test "https socket.encrypted is true on both ends" {
+    const actual = try helpers.runFixtureStdout(std.testing.allocator, "https/encrypted.mjs");
+    defer std.testing.allocator.free(actual);
+    try std.testing.expectEqualStrings(
+        \\client true true
+        \\server true true
+        \\body ok
+        \\closed
+        \\
+    , actual);
+}
+
 test "http server shutdown with a live listener" {
     const actual = try helpers.runFixtureStdout(std.testing.allocator, "http/shutdown.mjs");
     defer std.testing.allocator.free(actual);
