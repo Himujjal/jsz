@@ -3,7 +3,7 @@
 ## Usage
 
 ```text
-Usage: jsz [options] [script]
+Usage: jsz [options] [script] [args...]
 
 Run a JavaScript file, evaluate an expression, or start the REPL.
 
@@ -17,26 +17,39 @@ Commands:
   repl                Start the REPL
 ```
 
-Running `jsz` with no arguments starts the REPL. The CLI accepts at most one script path. If both `--eval` and a script are present, eval mode is used.
+Running `jsz` with no arguments starts the REPL. Options are interpreted only until the first script path or the source passed to `-e`/`--eval`. All remaining tokens, including `--help`, `--desktop`, and another path, are forwarded to `process.argv`; they are not parsed as jsz options. For a script, `process.argv` starts with the invocation string and the absolute script path; in eval mode, it starts with the invocation string followed by forwarded arguments.
+
+`jsz` is the runtime. To compile a script into a standalone executable that embeds this runtime, use the separate `jszc` binary; see [single-executable.md](single-executable.md).
 
 ## Arguments
 
 | Argument | Description |
 | --- | --- |
-| `[script]` | Run a JavaScript file. |
+| `[script] [args...]` | Run a JavaScript file and forward subsequent arguments to it. |
 | `-e`, `--eval <code>` | Evaluate the code string instead of running a file. |
 | `--desktop` | Run a main-process script with the native WebView backend and the `electron` builtin. Requires a script path; rejects `--eval` and the REPL. |
 | `-h`, `--help` | Print the usage text to stdout and exit. |
 | `-v`, `--version` | Print `jsz <version>` to stdout and exit. |
 | `repl` | Start the interactive REPL. |
 
-`--help` and `--version` are handled before the runtime is created. Both write to stdout and flush immediately. An `--eval` without a following value fails with `error.MissingEvalSource`. A second script path fails with `error.UnexpectedArgument`.
+`--help` and `--version` are handled before the runtime is created **when they occur before a script or eval source**. Both write to stdout and flush immediately. An `--eval` without a following value fails with `error.MissingEvalSource`. `--desktop` must precede the script and cannot be combined with eval mode. The `repl` token is ignored while parsing options, so `jsz repl` starts the REPL, but `jsz file.js repl` forwards `repl` to the script.
+
+For example, after `mise run build`:
+
+```sh
+./zig-out/bin/jsz -e 'console.log(JSON.stringify(process.argv.slice(1)))' --help ./other.js
+# prints ["--help","./other.js"]
+./zig-out/bin/jsz examples/timers.js --version
+# runs the script; --version is a script argument
+```
+
+If you use `mise run run`, pass runtime arguments after the task name, for example `mise run run examples/timers.js --version`.
 
 ## Output
 
 The CLI creates one stdout writer at startup and shares it with the runtime. This matters because each `std.Io.File.stdout()` writer starts at offset 0; creating a new writer for each message would overwrite earlier output. One writer preserves ordering.
 
-The runtime accumulates `console.log` and `console.error` output in a buffer. `Runtime.flush()` writes that buffer through the shared writer and clears it. Both console methods use the same runtime output path.
+The runtime buffers console output before flushing it through the shared stdout writer. Both the native `console.log` and `console.error` writers append to that same buffer; the JavaScript console facade formats their arguments, but its `error`/`warn` methods still use the shared output path. Do not rely on stderr separation for console output.
 
 ## REPL
 

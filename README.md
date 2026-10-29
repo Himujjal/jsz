@@ -1,195 +1,86 @@
 # jsz
 
-A small JavaScript runtime written in Zig 0.17 that embeds QuickJS and uses zio for timers and async I/O.
+**A small JavaScript runtime in Zig, with QuickJS under the hood.** Run a script, try a REPL, or package a script and its runtime into a single executable. jsz explores a useful *Node-shaped subset* without claiming to be Node.js: ESM, familiar builtins, asynchronous I/O, and an optional desktop mode backed by the platform WebView.
 
-## Status
+JavaScript stays on one QuickJS task; [zio](https://github.com/lalinsky/zio) handles timers and I/O tasks. This is an experimental runtime, not a drop-in replacement for Node or Electron.
 
-jsz implements Node.js 22 compatibility phases 0-6 from the
-[plan](docs/plan/plan.md): an ESM module loader, async filesystem, `process`,
-`os`, `crypto`, `child_process`, `path`, `url`, `util`, `events`, `Buffer`,
-TCP (`node:net`), `http.createServer`/`http.request`/`http.get`,
-`https.createServer`/`https.request`/`https.get`, and a global
-`fetch`/`Headers`/`Response`/`Request` over vendored dusty 0.5.0. All I/O runs
-on zio tasks while QuickJS stays on the single JS task.
+## Try it
 
-Phase 6 hardened the edges: `console` formatting and timers, `performance`,
-`global`, SIGTERM/SIGHUP handlers, recursive `readdir`, numeric `O_*` flags,
-`dest` fields on two-path errors, `Dirent.parentPath`, job-queue accounting
-guards, `ERR_SERVER_NOT_RUNNING`, `socket.encrypted`, and optional differential
-tests against a local `node` binary.
+Install [mise](https://mise.jdx.dev/) and build from this repository (the pinned toolchain is Zig 0.17.0):
 
-HTTP responses stream on both sides: the server sends `res.write` chunks as they
-arrive with a 64 KiB high-water mark driving `drain` backpressure, and client
-response bodies arrive through `IncomingMessage` `data`/`end`/`close`. `https`
-accepts `ca`, `cert`/`key`, `pfx`/`passphrase`, and `rejectUnauthorized` on the
-client and supports PEM, PFX, and mTLS on the server.
+```sh
+mise install
+mise run build
+./zig-out/bin/jsz -e 'console.log(1 + 1)'
+./zig-out/bin/jsz examples/promises.js
+```
 
-Still deferred (the last 10%): full Node streams and web streams, streaming
-`fetch` bodies and HTTP request bodies, trailers, interim 1xx responses, the
-`tls` module, `dns`, `zlib`, `worker_threads`, `readline`, `assert`, `fs.watch`,
-`fs` `*Sync` entry points, UDP, and `child_process.fork`. See the
-[roadmap](docs/roadmap.md) for the current list.
+The eval prints `2`; the promise example prints `start`, `values: a,b`, and `done`. Run `./zig-out/bin/jsz` for the REPL, or `./zig-out/bin/jsz --help` for CLI options. Building and running jsz does not require a system Node.js installation.
 
-## Desktop mode
+A script can use jsz's async builtins and timers:
 
-`jsz --desktop main.mjs` runs an Electron-shaped main-process script against
-the platform WebView (WKWebView on macOS, WebView2 on Windows, WebKitGTK on
-Linux) through zig-webui. The supported subset is `app`, `BrowserWindow`,
-`ipcMain`, `dialog`, and `shell`; preload scripts get `contextBridge` and
-`ipcRenderer`.
+```js
+import { readFile } from 'node:fs/promises';
+
+const text = await readFile('README.md', 'utf8');
+console.log(`README: ${text.length} characters`);
+await sleep(10);
+console.log('done');
+```
+
+Save this as `readme.mjs` in the repository root and run `./zig-out/bin/jsz readme.mjs`.
+
+## What is here
+
+| Area | Current scope |
+| --- | --- |
+| Modules and globals | ESM imports (including dynamic imports), `node:` and bare builtin specifiers; console, timers, promises, `sleep`, `Buffer`, URLs, and text encoding. |
+| Files and processes | Async `fs`/`fs/promises`, `path`, `process`, `os`, `crypto` (hash/HMAC/random), `util`, `events`, and a subset of `child_process`. |
+| Networking | TCP via `node:net`, HTTP/HTTPS servers and clients, and global `fetch` with `Headers`, `Request`, and `Response`. |
+| Packaging | `jszc` embeds a script and the runtime in one executable; optional assets are available through `node:sea`. |
+| Desktop | `--desktop` enables an Electron-shaped `electron` subset (`app`, `BrowserWindow`, IPC, dialogs, shell, and a preload bridge) over the native WebView, not Chromium. |
+
+For the exact boundaries, consult the [roadmap](docs/roadmap.md) rather than assuming Node API parity. For example, `fs` has no synchronous entry points; full Node/web streams, streaming fetch bodies, UDP, worker threads, and many Node modules are not implemented. HTTP server request bodies and fetch responses are buffered with size limits. Embedded assets are not a virtual filesystem for regular `fs` reads or module imports.
+
+## Make a single executable
+
+After `mise run build`, create `hello.mjs`:
+
+```js
+console.log(`hello ${process.argv.slice(2).join(' ')}`);
+```
+
+Then compile and run it:
+
+```sh
+./zig-out/bin/jszc hello.mjs -o hello
+./hello world
+```
+
+This prints `hello world`. The resulting executable contains the script and jsz runtime; it does not need a sibling `jsz`, Zig, or Node installation on a machine with the matching OS and architecture. A `sea.json` can add named assets and opt into desktop mode. See [single-executable apps](docs/single-executable.md) for configuration, `node:sea`, and distribution limitations.
+
+## Desktop experiment
+
+The repository includes a window, preload, IPC, and HTML example:
 
 ```sh
 ./zig-out/bin/jsz --desktop examples/electron/main.mjs
 ```
 
-`electron` is not an npm package and is unavailable outside `--desktop`.
-`node:electron` remains an unknown builtin. See [docs/cli.md](docs/cli.md) for
-the API and limitations.
+It opens a native window on a supported platform. The `electron` builtin is only available with `--desktop`; the API is intentionally much narrower than Electron's. The example also has an [asset configuration](examples/electron/sea.json) for `jszc`. See [CLI and desktop mode](docs/cli.md) for the supported API and caveats.
 
-## Requirements
-
-- [mise](https://mise.jdx.dev/), which installs Zig 0.17.0 and hk 2.8.1 from `mise.toml`
-- No system Node.js installation is needed
-
-## Quickstart
+## Develop and explore
 
 ```sh
-mise install
-mise run build
-mise run run examples/timers.js
-mise run repl
-mise run test
+mise run test       # Zig integration tests and JavaScript fixtures
+mise run check      # formatting check, build, and tests
+mise run fmt        # format Zig sources
 ```
 
-`mise run build` produces `zig-out/bin/jsz`. You can also run it directly:
+Contributions should keep the runtime's small scope and its tests in step; see [AGENTS.md](AGENTS.md) for repository conventions. Useful starting points:
 
-```sh
-./zig-out/bin/jsz examples/promises.js
-```
-
-## Supported API
-
-| Area | Surface |
-| --- | --- |
-| Modules | ESM `import`/`export`, `node:` and bare builtin specifiers, `import.meta`, dynamic `import()` |
-| Filesystem | `fs`/`fs/promises` async callbacks and promises, including recursive `readdir`, numeric `O_*` flags, `Stats`/`Dirent`; no `*Sync`, `fs.opendir`, or `fs.watch` |
-| Process | `process.argv`, `env`, `cwd`, `chdir`, `exit`, `hrtime`, `stdout`/`stderr` (`fd` 1/2), SIGINT/SIGTERM/SIGHUP, `uncaughtException` |
-| Runtime | `console` (formatting, `dir`, `trace`, `time`), timers, `queueMicrotask`, native Promises, `performance`, `global`, `Buffer`, `TextEncoder`/`TextDecoder`, `atob`/`btoa`, `URL`, `URLSearchParams` |
-| System | `os`, `crypto` (hash, HMAC, random), `path` (posix + win32), `util`, `events`, `child_process` |
-| Network | `net.createServer`/`net.connect` (TCP), `http.createServer`/`http.request`/`http.get`, `https.createServer`/`https.request`/`https.get`, global `fetch`, `Headers`, `Response`, `Request` |
-| Desktop | Opt-in `jsz --desktop main.mjs` with an Electron-shaped `electron` subset (`app`, `BrowserWindow`, `ipcMain`, `dialog`, `shell`, preload `contextBridge`/`ipcRenderer`) over the platform WebView |
-
-The HTTP server and client use a vendored [dusty](https://github.com/lalinsky/dusty)
-0.5.0 (`vendor/dusty`) over zio's `std.Io` implementation. The vendored copy
-carries a small patch so the response status line can carry a numeric code and a
-caller-supplied reason phrase, and so the client parser accepts status codes its
-`Status` enum does not name. JavaScript is single-threaded; file, child, network,
-and fetch work runs in zio tasks and completes through the event loop.
-
-Timer delays are clamped to 2,147,483,647 ms. A timer callback must be a function.
-
-### Compatibility notes
-
-- `fs` is async-only. `*Sync` names throw `ERR_METHOD_NOT_IMPLEMENTED` naming the
-  async alternative, and `existsSync` is not exported.
-- Numeric `fs.constants.O_*` flags are accepted because they are translated to
-  the string flags the driver supports. `O_SYNC`/`O_DSYNC` are accepted in a
-  mask but are not honored; `a`/`a+` appends with a stat-then-write rather than
-  an atomic `O_APPEND`.
-- `Stats.uid`, `gid`, `dev`, and `rdev` are `0` because `std.Io.File.Stat` does
-  not expose them; `birthtime` falls back to `ctime`.
-- Recursive `readdir` joins nested names with `/` and sets
-  `Dirent.parentPath` (with the older `dirent.path` alias).
-- `net.Server.close()` stops accepting and does not wait for accepted sockets;
-  `http.Server.close()` drains in-flight responses. Closing a server that never
-  listened reports `ERR_SERVER_NOT_RUNNING`.
-- `socket.encrypted` is `true` on HTTPS server requests and client responses and
-  `false` on plain HTTP/TCP sockets.
-- Unhandled promise rejections print `UnhandledPromiseRejectionWarning` and exit
-  `1`; Node 22 throws `ERR_UNHANDLED_REJECTION` by default.
-- `process.nextTick` shares QuickJS's single job queue with promise reactions,
-  so Node's nextTick-before-promise ordering is not guaranteed.
-
-## Example
-
-```js
-setTimeout(() => {
-    console.log("timer");
-}, 10);
-
-async function main() {
-    console.log("start");
-    await sleep(20);
-    console.log("after sleep");
-}
-
-main();
-```
-
-## Project layout
-
-```text
-.
-├── build.zig                 build graph for the module, executable, and tests
-├── build.zig.zon             pinned QuickJS and zio dependencies; minimum Zig version
-├── mise.toml                 Zig and hk tool pins plus developer tasks
-├── hk.pkl                    pre-commit checks for format, build, and tests
-├── src/
-│   ├── main.zig              process entry point; receives std.process.Init
-│   ├── root.zig              public module exports and version string
-│   ├── runtime.zig           zio runtime, QuickJS runtime/context, host wiring
-│   ├── event_loop.zig        timers, completion queue, job draining, run guards
-│   ├── module.zig            ESM resolver, builtin registry, module loader
-│   ├── jobs.zig              I/O task -> JS task completion queue
-│   ├── fs.zig                async filesystem coordinator
-│   ├── child_process.zig     child-process coordinator
-│   ├── net.zig               TCP server/socket coordinator
-│   ├── http.zig              dusty-backed HTTP server coordinator
-│   ├── fetch.zig             dusty-backed HTTP/HTTPS client coordinator
-│   ├── pkcs12.zig            pure-Zig PKCS#12/PFX parser for `https` `pfx`
-│   ├── builtins/             embedded ESM modules (path, fs, http, https, net, ...)
-│   ├── js/                   native QuickJS modules, host, value helpers
-│   └── cli/cli.zig           argument parsing, script/eval/REPL dispatch
-├── tests/
-│   ├── zig/                  Zig integration tests and fixture harness
-│   └── fixtures/             JavaScript fixtures, including net/http/https/fetch
-├── vendor/dusty/             dusty 0.5.0 with the numeric status-line patch
-├── examples/                 runnable demo scripts
-├── docs/                     architecture, CLI, testing, and roadmap notes
-└── .forgejo/workflows/       Forgejo Actions CI and release workflow
-```
-
-## Development tasks
-
-| Task | Description |
-| --- | --- |
-| `mise run fmt` | Format Zig sources with `zig fmt`. |
-| `mise run fmt-check` | Check formatting without changing files. |
-| `mise run build` | Build the debug CLI. |
-| `mise run build-release` | Build with `-Doptimize=ReleaseSafe`. |
-| `mise run test` | Run Zig integration tests and JavaScript fixtures. |
-| `mise run run` | Run a script; arguments after the task name are forwarded. |
-| `mise run repl` | Start the interactive REPL. |
-| `mise run test-watch` | Re-run tests on change with `zig build test --watch`. |
-| `mise run run-watch` | Restart the CLI on change with `mise watch`. |
-| `mise run check` | Run format check, build, and tests. |
-| `mise run ci` | Run format check, a ReleaseSafe build, and tests. |
-| `mise run doc` | List the documentation entry points. |
-| `mise run install-hooks` | Install hk git hooks. |
-
-`mise run run` forwards script arguments, for example:
-
-```sh
-mise run run examples/timers.js
-```
-
-## Documentation
-
-- [Architecture](docs/architecture.md): components, lifecycle, event loop, promises, ownership.
-- [CLI](docs/cli.md): flags, REPL behavior, exit codes, examples.
-- [Testing](docs/testing.md): test layers, fixtures, guards, and commands.
-- [Roadmap](docs/roadmap.md): shipped scope, non-goals, limitations, and possible next steps.
-
-## Commits
-
-Use Conventional Commits, for example `feat(runtime): add sleep()`. Keep one logical change per commit.
+- [Architecture](docs/architecture.md) — runtime, event loop, and ownership.
+- [CLI](docs/cli.md) — invocation, REPL, errors, and desktop mode.
+- [Single executable apps](docs/single-executable.md) — packaging and assets.
+- [Testing](docs/testing.md) — fixtures and test commands.
+- [Roadmap](docs/roadmap.md) — shipped features, known limitations, and possible next steps.

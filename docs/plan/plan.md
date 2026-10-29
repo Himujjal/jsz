@@ -1,4 +1,11 @@
-# jsz Node.js 90% compatibility plan
+# jsz Node.js 90% compatibility plan (historical)
+
+> **Historical design record.** The early "today" and "current state" sections below
+> describe the runtime before the module loader and Node-shaped APIs were added;
+> they are not a current feature list. Phases 0 through 6 were subsequently
+> implemented. For current usage and limitations, see the [CLI](../cli.md),
+> [architecture](../architecture.md), and [roadmap](../roadmap.md). Section 15
+> records the remaining backlog.
 
 Status: Phases 0 through 6 implemented; see §15 Backlog for residual P2/P3 work
 Target runtime: Zig 0.17.0, QuickJS-ng 0.17.0 (via `zig-quickjs-ng`, pinned
@@ -1859,7 +1866,7 @@ names the phase that should pick it up and a priority:
 | `performance` global | implemented: `{ now(), timeOrigin }` over `process.hrtime.bigint()` | Add `mark`/`measure` only if a caller needs them | - |
 | `globalThis.global` | implemented as an alias of `globalThis` | None | - |
 | `structuredClone` | deferred | QuickJS lacks it; implement over JSON only for plain data, or keep deferred | P3 |
-| `console` extras | implemented: `log/info/warn/error/debug` format via `util.format`, plus `trace`, `dir`, `assert`, `time`/`timeEnd`; `warn`/`error` use the stderr writer | Add `table`/`group`/`count` only if needed | - |
+| `console` extras | implemented: `log/info/warn/error/debug` format via `util.format`, plus `trace`, `dir`, `assert`, `time`/`timeEnd`; `warn`/`error` currently share the native stdout buffer | Add `table`/`group`/`count` only if needed | - |
 | `import.meta.resolve` | not implemented | Needs a synchronous resolver; document as unsupported | P3 |
 | Shutdown promise settlement | queue shutdown aborts queued jobs (`abort` frees them) but does not reject their promises; the loop is stopping, so no JS observes them | Reject with an internal `ERR_JSZ_SHUTDOWN` only if an embedder can outlive `run()` | P3 |
 | Dynamic `import()` | covered by `tests/fixtures/modules/dynamic.mjs`: entry, timer, microtask, `file:` URL, percent-encoded paths, directory index probing, cache identity, caught failures, and an uncaught rejection that exits 1 | Keep extending when new loader paths land | - |

@@ -2,6 +2,10 @@
 
 This page records what ships today, the intentional exclusions, and the next
 steps. The next steps are ideas, not commitments, and the order is approximate.
+For runnable commands see the [CLI](cli.md); for packaging and desktop assets
+see [single-executable apps](single-executable.md). The older
+[compatibility plan](plan/plan.md) preserves historical design decisions and
+should not be read as a current feature inventory.
 
 ## Shipped
 
